@@ -175,25 +175,35 @@ export class AgentPTY {
       }
     });
 
-    // Claude Code shows a "trust this folder?" prompt on first run in a new directory.
-    // Auto-accept by sending Enter after the prompt appears.
-    // The prompt takes ~3-5s to render; we send Enter at 5s and 8s for reliability.
-    setTimeout(() => {
-      if (this.pty) {
-        const recent = this.outputBuffer.getRecent();
-        if (recent.includes('trust') || recent.includes('Yes')) {
-          this.pty.write('\r');
-        }
+    // Claude Code shows interactive prompts on first run that must be auto-accepted.
+    // ANSI note: Claude Code's TUI uses \x1b[1C (cursor-forward) as word separators,
+    // so after ANSI stripping "Bypass Permissions" becomes "BypassPermissions" and
+    // "Yes, I accept" becomes "Yes,Iaccept". Match against the collapsed forms.
+    //
+    // Dialog sequence:
+    // 1. "Trust this folder?" — Enter accepts (option 1 already selected)
+    // 2. "New MCP server found" — Enter accepts (option 1 "Use this MCP server" selected)
+    // 3. "Bypass Permissions mode WARNING" — ↓ then Enter (option 1 is "No,exit"; must reach option 2 "Yes,Iaccept")
+    const acceptDialog = () => {
+      if (!this.pty) return;
+      const raw = this.outputBuffer.getRecent();
+      const stripped = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\x1b[()][AB012]/g, '');
+      if (stripped.includes('BypassPermissions') || stripped.includes('Yes,Iaccept') ||
+          stripped.includes('bypass permissions') || stripped.includes('No,exit')) {
+        // Navigate down to "Yes, I accept" then confirm with Enter
+        this.pty.write('\x1b[B'); // down arrow
+        setTimeout(() => { if (this.pty) this.pty.write('\r'); }, 300);
+      } else if (stripped.includes('trust') || stripped.includes('MCPserver') ||
+                 stripped.includes('MCP server') || stripped.includes('Entertoconfirm') ||
+                 stripped.includes('Enter to confirm')) {
+        this.pty.write('\r');
       }
-    }, 5000);
-    setTimeout(() => {
-      if (this.pty) {
-        const recent = this.outputBuffer.getRecent();
-        if (recent.includes('trust') || recent.includes('Yes')) {
-          this.pty.write('\r');
-        }
-      }
-    }, 8000);
+    };
+    setTimeout(acceptDialog, 3000);
+    setTimeout(acceptDialog, 5000);
+    setTimeout(acceptDialog, 8000);
+    setTimeout(acceptDialog, 12000);
+    setTimeout(acceptDialog, 17000);
   }
 
   /**
