@@ -21,7 +21,6 @@ module.exports = {
       max_restarts: 50,
       restart_delay: 15000,
       autorestart: true,
-      max_memory_restart: '500M',
     },
     {
       name: 'cortextos-dashboard',
