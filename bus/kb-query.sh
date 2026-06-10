@@ -85,7 +85,7 @@ fi
 # Paths
 KB_ROOT="$HOME/.cortextos/$INSTANCE_ID/orgs/$ORG/knowledge-base"
 CHROMADB_DIR="$KB_ROOT/chromadb"
-VENV_DIR="$FRAMEWORK_ROOT/knowledge-base/venv"
+VENV_DIR="/home/mhunnicutt_foothills/kb-venv"
 MMRAG_PY="$FRAMEWORK_ROOT/knowledge-base/scripts/mmrag.py"
 
 # Source org secrets
@@ -111,7 +111,21 @@ export GEMINI_API_KEY
 
 run_query() {
   local col="$1"
-  "$VENV_DIR/bin/python3" "$MMRAG_PY" query "$QUESTION" \
+  # Resolve platform-specific venv paths (Windows uses Scripts/, Unix uses bin/)
+  if [[ -d "$VENV_DIR/Scripts" ]]; then
+    VENV_BIN="$VENV_DIR/Scripts"
+  else
+    VENV_BIN="$VENV_DIR/bin"
+  fi
+  # Find python binary (Windows has .exe extension, Unix does not)
+  local _venv_python=""
+  for _py in python3 python python3.exe python.exe; do
+    [[ -f "$VENV_BIN/$_py" ]] && _venv_python="$VENV_BIN/$_py" && break
+  done
+  if [[ -z "$_venv_python" ]]; then
+    echo "ERROR: No Python binary found in $VENV_BIN"; return 1
+  fi
+  "$_venv_python" "$MMRAG_PY" query "$QUESTION" \
     --collection "$col" \
     --top-k "$TOP_K" \
     --threshold "$THRESHOLD" \

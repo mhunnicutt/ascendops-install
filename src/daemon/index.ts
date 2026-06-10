@@ -291,6 +291,11 @@ class Daemon {
 
     console.log(`[daemon] Starting cortextOS daemon (instance: ${this.instanceId})`);
 
+    // Expose computed ctxRoot so sub-modules (crons.ts, cron-execution-log.ts)
+    // that use process.env.CTX_ROOT pick up the correct path rather than
+    // falling back to process.cwd() (the framework root).
+    process.env.CTX_ROOT = this.ctxRoot;
+
     const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT || '';
     const org = process.env.CTX_ORG || '';
 

@@ -280,9 +280,9 @@ export class AgentManager {
         botToken = undefined;
       }
 
-      // ALLOWED_USER must be a numeric Telegram user ID, not a username
-      if (allowedUserId && !/^\d+$/.test(allowedUserId)) {
-        log(`SECURITY: ALLOWED_USER is not a numeric ID. Telegram user IDs are numbers (e.g. 123456789). Refusing to enable Telegram. Fix the .env file.`);
+      // ALLOWED_USER must be a numeric Telegram user ID or comma-separated list of IDs
+      if (allowedUserId && !/^\d+(,\d+)*$/.test(allowedUserId)) {
+        log(`SECURITY: ALLOWED_USER is not a numeric ID or comma-separated list (e.g. 123456789 or 123456789,987654321). Refusing to enable Telegram. Fix the .env file.`);
         allowedUserId = undefined;
       }
 
@@ -515,10 +515,10 @@ export class AgentManager {
 
       poller.onMessage((msg) => {
         // ALLOWED_USER gate: if configured, ignore messages from other users.
-        // Use numeric comparison to avoid string coercion issues.
+        // Supports comma-separated list of numeric IDs (e.g. "123,456").
         if (allowedUserId) {
-          const allowedId = parseInt(allowedUserId, 10);
-          if (msg.from?.id !== allowedId) {
+          const allowedIds = allowedUserId.split(',').map(id => parseInt(id.trim(), 10));
+          if (!allowedIds.includes(msg.from?.id ?? -1)) {
             log(`Ignoring message from unauthorized user (allowed_user gate)`);
             return;
           }
@@ -620,8 +620,8 @@ export class AgentManager {
         // ALLOWED_USER gate: same rule as message handler. If configured,
         // ignore reactions from other users.
         if (allowedUserId) {
-          const allowedId = parseInt(allowedUserId, 10);
-          if (reaction.user?.id !== allowedId) {
+          const allowedIds = allowedUserId.split(',').map(id => parseInt(id.trim(), 10));
+          if (!allowedIds.includes(reaction.user?.id ?? -1)) {
             log('Ignoring reaction from unauthorized user (allowed_user gate)');
             return;
           }

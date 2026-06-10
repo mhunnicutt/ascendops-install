@@ -34,7 +34,7 @@ fi
 # Paths
 KB_ROOT="$HOME/.cortextos/$INSTANCE_ID/orgs/$ORG/knowledge-base"
 CHROMADB_DIR="$KB_ROOT/chromadb"
-VENV_DIR="$FRAMEWORK_ROOT/knowledge-base/venv"
+VENV_DIR="/home/mhunnicutt_foothills/kb-venv"
 MMRAG_PY="$FRAMEWORK_ROOT/knowledge-base/scripts/mmrag.py"
 REQS="$FRAMEWORK_ROOT/knowledge-base/scripts/requirements.txt"
 
@@ -49,10 +49,21 @@ echo ""
 mkdir -p "$CHROMADB_DIR"
 echo "  [OK] ChromaDB directory created"
 
+# Detect Python binary (python3 may be a MS Store stub on Windows)
+if python3 --version &>/dev/null && [[ "$(python3 -c 'import sys; print(sys.version_info.major)' 2>/dev/null)" == "3" ]]; then
+  PYTHON_BIN="python3"
+elif python --version &>/dev/null && [[ "$(python -c 'import sys; print(sys.version_info.major)' 2>/dev/null)" == "3" ]]; then
+  PYTHON_BIN="python"
+else
+  echo "  ERROR: No working Python 3 found. Install Python 3.11+ and ensure it's on PATH."
+  exit 1
+fi
+echo "  [OK] Using Python: $PYTHON_BIN ($(${PYTHON_BIN} --version))"
+
 # Create Python venv if not present
 if [[ ! -d "$VENV_DIR" ]]; then
   echo "  Creating Python venv..."
-  python3 -m venv "$VENV_DIR"
+  "$PYTHON_BIN" -m venv "$VENV_DIR"
   echo "  [OK] Venv created"
 else
   echo "  [OK] Venv already exists"

@@ -72,7 +72,7 @@ fi
 # Paths
 KB_ROOT="$HOME/.cortextos/$INSTANCE_ID/orgs/$ORG/knowledge-base"
 CHROMADB_DIR="$KB_ROOT/chromadb"
-VENV_DIR="$FRAMEWORK_ROOT/knowledge-base/venv"
+VENV_DIR="/home/mhunnicutt_foothills/kb-venv"
 MMRAG_PY="$FRAMEWORK_ROOT/knowledge-base/scripts/mmrag.py"
 
 # Source org secrets for GEMINI_API_KEY
@@ -113,7 +113,22 @@ for path in "${PATHS[@]}"; do
   echo "  Source: $path"
 done
 
-"$VENV_DIR/bin/python3" "$MMRAG_PY" ingest "${PATHS[@]}" \
+# Resolve platform-specific venv paths (Windows uses Scripts/, Unix uses bin/)
+if [[ -d "$VENV_DIR/Scripts" ]]; then
+  VENV_BIN="$VENV_DIR/Scripts"
+else
+  VENV_BIN="$VENV_DIR/bin"
+fi
+# Find python binary (Windows has .exe extension, Unix does not)
+VENV_PYTHON=""
+for _py in python3 python python3.exe python.exe; do
+  [[ -f "$VENV_BIN/$_py" ]] && VENV_PYTHON="$VENV_BIN/$_py" && break
+done
+if [[ -z "$VENV_PYTHON" ]]; then
+  echo "ERROR: No Python binary found in $VENV_BIN"; exit 1
+fi
+
+"$VENV_PYTHON" "$MMRAG_PY" ingest "${PATHS[@]}" \
   --collection "$COLLECTION" \
   ${FORCE}
 
