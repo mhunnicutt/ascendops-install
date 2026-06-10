@@ -5,11 +5,17 @@ $env:CTX_ORG = "foothills-pm"
 $env:CTX_INSTANCE_ID = "default"
 Set-Location "C:\Users\mhunnicutt_foothills\ascendops-install"
 
-# Start the build watcher in background
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd C:\Users\mhunnicutt_foothills\ascendops-install; npm run dev"
+# Build the TypeScript sources
+Write-Host "Building..."
+npm run build
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Build failed. Aborting."
+    exit 1
+}
 
-# Wait for build to complete
-Start-Sleep -Seconds 15
+# Start the daemon via PM2 (auto-restarts on crash, restarts at 500MB to prevent OOM)
+Write-Host "Starting daemon via PM2..."
+pm2 start ecosystem.config.js --only cortextos-daemon
 
-# Start the daemon
-node dist/daemon.js
+# Show status
+pm2 list
