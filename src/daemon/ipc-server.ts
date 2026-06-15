@@ -517,10 +517,21 @@ export class IPCServer {
         });
       });
 
+      // On Windows, unlinkSync() does not remove named pipes. Without a
+      // retried guard, every EADDRINUSE fires this handler again → another
+      // server.listen() call → another 'listening' listener. After 10 retries
+      // the MaxListenersExceededWarning fires and the loop never resolves.
+      // Fix: allow exactly one retry; reject on a second EADDRINUSE so the
+      // caller surfaces a clear error instead of spinning.
+      let _retried = false;
       this.server.on('error', (err: NodeJS.ErrnoException) => {
-        if (err.code === 'EADDRINUSE') {
+        if (err.code === 'EADDRINUSE' && !_retried) {
+          _retried = true;
           // Race: process was killed after unlink but before bind completed.
-          // Clean up the re-created socket and retry once.
+          // Clean up the re-created socket (no-op on Windows named pipes) and
+          // retry once. Remove accumulated 'listening' listener from the failed
+          // listen() call first to prevent silent listener growth.
+          this.server!.removeAllListeners('listening');
           try { unlinkSync(this.socketPath); } catch { /* ignore */ }
           this.server!.listen(this.socketPath, () => {
             console.log(`[ipc] Listening on ${this.socketPath} (recovered from stale socket)`);

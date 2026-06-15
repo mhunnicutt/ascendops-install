@@ -21,6 +21,11 @@ module.exports = {
       max_restarts: 50,
       restart_delay: 15000,
       autorestart: true,
+      // Safety net: restart daemon if heap exceeds 1.5 GB. Root cause of OOM
+      // not yet confirmed (needs heap profiling); this prevents total fleet loss
+      // while investigation continues. Intentionally more generous than the
+      // reverted 500M limit to avoid false-positive restarts under normal load.
+      max_memory_restart: '1500M',
     },
     {
       name: 'cortextos-dashboard',
