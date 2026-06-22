@@ -1,13 +1,13 @@
 ---
 name: gmail
 effort: low
-description: "Read and draft emails via david@noogalabs.com Gmail. Use for checking PM notifications, drafting vendor emails, and monitoring inbox for property-related messages. All outbound emails require David's approval before sending."
+description: "Read and draft emails via your configured Gmail account. Use for checking notifications, drafting vendor emails, and monitoring inbox for relevant messages. All outbound emails require your approver's sign-off before sending."
 triggers: ["email", "gmail", "inbox", "send email", "draft email", "check email", "vendor email", "tenant email", "PM email", "property meld email"]
 ---
 
 # Gmail Skill
 
-Access david@noogalabs.com via the `gws` CLI. Already authenticated with OAuth2 refresh token.
+Access your configured Gmail account via the `gws` CLI. Set up your own Google OAuth2 credentials first (see the `gws` setup docs); once authenticated, the CLI uses your stored refresh token.
 
 ## Read inbox
 
@@ -25,33 +25,33 @@ gws gmail users messages get --user-id me --id <message_id> --format json
 
 ## Send email
 
-**APPROVAL REQUIRED** — never send without David's explicit approval.
+**APPROVAL REQUIRED** — never send without your approver's explicit sign-off.
 
 ```bash
 # Draft and send (only after approval)
 gws gmail +send --to "vendor@example.com" --subject "Subject" --body "Body text"
 
 # With CC
-gws gmail +send --to "vendor@example.com" --cc "david@noogalabs.com" --subject "Subject" --body "Body"
+gws gmail +send --to "vendor@example.com" --cc "you@example.com" --subject "Subject" --body "Body"
 ```
 
 ## Workflow
 
-1. **Reading:** Free to read inbox at any time for PM notifications, vendor responses, tenant messages
-2. **Drafting:** Write the draft, send to Dane for routing to David for approval
-3. **Sending:** Only after David approves via Telegram. Always CC david@noogalabs.com on vendor comms.
+1. **Reading:** Free to read inbox at any time for notifications, vendor responses, tenant messages
+2. **Drafting:** Write the draft, then route it to your configured approver (e.g. via your orchestrator or Telegram) for sign-off
+3. **Sending:** Only after your approver signs off. CC your own account on outbound vendor comms if you want a copy.
 4. **Night mode:** Read only. Queue drafts for morning review. No sending.
 
 ## Mark message as processed
 
-After acting on a Gmail watch message, apply the `blue-processed` label (ID: `Label_72`) instead of marking read. IMAP clients re-mark read messages unread within seconds; the label persists correctly.
+After acting on a Gmail watch message, apply your own "processed" label (e.g. `your-processed-label`, label ID `Label_XXX`) instead of marking read. IMAP clients re-mark read messages unread within seconds; a label persists correctly.
 
 ```bash
 # Mark a message as processed (required after every Gmail watch action)
-gws gmail users messages modify --params '{"userId":"me","id":"<MESSAGE_ID>"}' --json '{"addLabelIds":["Label_72"]}' --format json
+gws gmail users messages modify --params '{"userId":"me","id":"<MESSAGE_ID>"}' --json '{"addLabelIds":["<YOUR_PROCESSED_LABEL_ID>"]}' --format json
 ```
 
-Gmail watch query filters on `-label:blue-processed` so labeled messages won't re-appear.
+Point your Gmail watch query at `-label:your-processed-label` so labeled messages won't re-appear.
 
 ## Useful searches
 

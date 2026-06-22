@@ -20,7 +20,7 @@ operator hasn't completed bootstrap, point them there. The two phases:
 - **Phase 1 — Bootstrap (must be done before this skill matters):** create prereq
   accounts (GitHub, Anthropic/Claude, Google, Telegram, optional Telnyx) → install
   Claude Code (`npm install -g @anthropic-ai/claude-code` + `claude login`) → run
-  the installer (`curl -fsSL https://raw.githubusercontent.com/noogalabs/ascendops-install/main/install.mjs | node`)
+  the installer (`curl -fsSL https://raw.githubusercontent.com/noogalabs/ascendops/main/install.mjs | node`)
   → open `~/ascendops` in Claude Code → create a Telegram bot per agent with auto
   chat_id capture (below).
 - **Phase 2 — Onboarding (this skill):** configure the agent for the operator's PM
@@ -49,6 +49,20 @@ For THIS agent, if its `.env` has no `BOT_TOKEN`/`CHAT_ID` yet:
    (Interactive alternative: `cortextos bot create "$CTX_AGENT_NAME"`.)
 
 Only after the bot is wired does the rest of onboarding (below) run.
+
+### Optional AscendOps support access
+
+Ask the operator whether they want to enable AscendOps support access for this
+agent so the owner can help through the agent's Telegram bot. Default to **No**. If
+they choose yes, run:
+
+```bash
+cortextos support-access enable --agent "$CTX_AGENT_NAME" --org "$CTX_ORG"
+```
+
+Show the command output, including the share-instruction for the owner. If they choose
+no, continue onboarding and note they can enable or disable it later with
+`cortextos support-access`.
 
 ---
 

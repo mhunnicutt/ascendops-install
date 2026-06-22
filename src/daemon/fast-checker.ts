@@ -16,8 +16,9 @@ import {
   formatSlackOriginator,
 } from '../slack/slack-identity.js';
 import { KEYS } from '../pty/inject.js';
-import { stripControlChars, validateOrgName } from '../utils/validate.js';
+import { stripControlChars, sanitizeForPtyInjection, wrapFenceSafe, validateOrgName } from '../utils/validate.js';
 import { resolve as pathResolve } from 'path';
+import { atomicWriteSync } from '../utils/atomic.js';
 // added 2026-04-29 by collie via dane dispatch — RFC #15 Day-1 dispatcher integration; Piece 3 (handler-type wiring) deferred to Day-2
 import { loadHookRegistry, matchHooks, dispatchHook, type HookRegistry } from '../bus/hooks.js';
 import { registerBuiltInHandlers } from '../bus/hook-handlers/index.js';
@@ -45,6 +46,11 @@ type ContextStatus = {
   session_id?: string;
 };
 
+type WatchdogRestartMarker = {
+  restartedAt: number;
+  stdoutHighWater: number;
+};
+
 /**
  * Fast message checker for a single agent.
  * Replaces fast-checker.sh: polls Telegram and inbox, injects into PTY.
@@ -65,7 +71,7 @@ export class FastChecker {
   private frameworkRoot: string;
   private telegramApi?: TelegramAPI;
   private chatId?: string;
-  private allowedUserId?: number;
+  private allowedUserIds?: number[];
 
   // External Telegram handler (set by daemon)
   private telegramMessages: Array<{ formatted: string; ackIds: string[] }> = [];
@@ -91,6 +97,13 @@ export class FastChecker {
   private gmailDeliveredIds: Map<string, number> = new Map();
   private gmailDeliveredIdsPath: string = '';
   private readonly GMAIL_DELIVERED_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30d
+  // F8: Gmail checks run on their own timer (armed in start()), NOT inside
+  // pollCycle — the worst-case Gmail batch takes minutes and would trip the
+  // 30s pollCycle timeout. The tick is intentionally shorter than the watch
+  // interval; checkGmailWatch self-gates on gmailWatch.intervalMs.
+  private gmailWatchTimer: NodeJS.Timeout | null = null;
+  private gmailCheckInFlight: boolean = false;
+  private readonly GMAIL_TIMER_TICK_MS = 30_000;
 
   // Slack watch state
   private slackWatch?: { channel: string; intervalMs: number };
@@ -125,6 +138,7 @@ export class FastChecker {
   private readonly WATCHDOG_WINDOW_MS = 15 * 60 * 1000; // 15 min
   private readonly WATCHDOG_CIRCUIT_RESET_MS = 30 * 60 * 1000; // 30 min
   private lastHardRestartAt: number = 0;
+  private watchdogRestartMarkerFile: string = '';
   private stdoutLastSize: number = 0;
   private stdoutLastChangeAt: number = 0;
   private watchdogTriggered: boolean = false;
@@ -256,6 +270,7 @@ export class FastChecker {
       telegramApi?: TelegramAPI;
       chatId?: string;
       allowedUserId?: number;
+      allowedUserIds?: number[];
       gmailWatch?: { query: string; intervalMs: number; processedLabelId?: string };
       slackWatch?: {
         channel: string;
@@ -274,12 +289,13 @@ export class FastChecker {
     this.log = options.log || ((msg) => console.log(`[fast-checker/${agent.name}] ${msg}`));
     this.telegramApi = options.telegramApi;
     this.chatId = options.chatId;
-    this.allowedUserId = options.allowedUserId;
+    this.allowedUserIds = options.allowedUserIds ?? (options.allowedUserId !== undefined ? [options.allowedUserId] : undefined);
     this.ctxThresholdPct = options.ctxRestartThreshold ?? 70;
 
     // Initialize persistent dedup
     this.dedupFilePath = join(paths.stateDir, '.message-dedup-hashes');
     this.loadDedupHashes();
+    this.watchdogRestartMarkerFile = join(paths.stateDir, '.watchdog-restart-at');
 
     // Initialize Gmail watch
     if (options.gmailWatch) {
@@ -307,6 +323,11 @@ export class FastChecker {
     this.loadCtxCircuit();
   }
 
+  private isAllowedTelegramUser(fromUserId: number | undefined): boolean {
+    if (!this.allowedUserIds || this.allowedUserIds.length === 0) return true;
+    return typeof fromUserId === 'number' && this.allowedUserIds.includes(fromUserId);
+  }
+
   /**
    * Start the polling loop.
    */
@@ -328,6 +349,17 @@ export class FastChecker {
 
     // Wait for bootstrap
     await this.waitForBootstrap();
+    // F5: stop() may have landed while we were waiting (stop/restart within
+    // the ~30s bootstrap window is common). stop() clears timers only if they
+    // are already set — arming them now would orphan them: nothing would ever
+    // clear them and the heartbeat would keep marking a STOPPED agent online.
+    if (!this.running) {
+      this.log('Stopped during bootstrap wait — not arming timers or poll loop');
+      if (process.platform !== 'win32') {
+        process.removeListener('SIGUSR1', sigusr1Handler);
+      }
+      return;
+    }
     this.log('Bootstrap complete. Beginning poll loop.');
     this.bootstrappedAt = Date.now();
     this.stdoutLastChangeAt = Date.now();
@@ -403,6 +435,9 @@ export class FastChecker {
               this.chatId,
               `⚠️ ${agentName} watchdog tripped — ${this.watchdogRestarts.length} auto-restarts in ${winMin}min. Restart loop paused ${resetMin}min. Likely upstream issue. Manual fix: pm2 restart cortextos-daemon`,
             )
+            .then(() => {
+              this.log(`Telegram watchdog circuit-breaker notification sent for ${agentName}`);
+            })
             .catch(() => {});
         }
         this.lastPollCycleCompletedAt = now;
@@ -419,6 +454,25 @@ export class FastChecker {
       });
       this.lastPollCycleCompletedAt = now;
     }, WATCHDOG_INTERVAL_MS);
+
+    // F8: Gmail watch runs on its OWN timer, decoupled from the 1s pollCycle.
+    // checkGmailWatch worst-case is minutes (up to 20 metadata fetches at 10s
+    // each + 20 label-modifies at 10s each), which raced against
+    // POLL_CYCLE_TIMEOUT_MS (30s) inside pollCycle — any Gmail batch beyond
+    // ~3 messages tripped a spurious "pollCycle timeout" and left the
+    // abandoned check running concurrently with new cycles. The timer ticks
+    // every 30s; checkGmailWatch still self-gates on the configured
+    // intervalMs (default 15 min), so the polling cadence is unchanged. The
+    // in-flight flag prevents overlapping runs when a check outlasts a tick.
+    if (this.gmailWatch) {
+      this.gmailWatchTimer = setInterval(() => {
+        if (this.gmailCheckInFlight) return;
+        this.gmailCheckInFlight = true;
+        this.checkGmailWatch()
+          .catch(err => this.log(`Gmail watch error: ${err}`))
+          .finally(() => { this.gmailCheckInFlight = false; });
+      }, this.GMAIL_TIMER_TICK_MS);
+    }
 
     // added 2026-04-29 by collie via dane dispatch — RFC #15 Day-1 dispatcher integration; Piece 3 (handler-type wiring) deferred to Day-2
     this.startHookDispatcher();
@@ -464,6 +518,10 @@ export class FastChecker {
     if (this.pollCycleWatchdog !== null) {
       clearInterval(this.pollCycleWatchdog);
       this.pollCycleWatchdog = null;
+    }
+    if (this.gmailWatchTimer !== null) {
+      clearInterval(this.gmailWatchTimer);
+      this.gmailWatchTimer = null;
     }
     // added 2026-04-29 by collie via dane dispatch — RFC #15 Day-1 dispatcher integration; Piece 3 (handler-type wiring) deferred to Day-2
     if (this.hookRegistryWatcher !== null) {
@@ -665,13 +723,20 @@ export class FastChecker {
     let messageBlock = '';
     const ackIds: string[] = [];
 
-    // Process queued Telegram messages
-    let hasTelegramMessage = false;
+    // Process queued Telegram messages. Drain into a local buffer rather than
+    // discarding outright — if injection fails because the agent is not running
+    // (mid-restart / NOT_RUNNING) we must re-queue, since the in-memory queue is
+    // the ONLY backing store for Telegram (no inbox-style ACK/redelivery).
+    // Mirrors the inbox ACK-after-inject recovery model below. DEDUPED failures
+    // are dropped instead (see below) — retrying identical content can never
+    // succeed and would loop forever.
+    const drainedTelegram: typeof this.telegramMessages = [];
     while (this.telegramMessages.length > 0) {
       const msg = this.telegramMessages.shift()!;
       messageBlock += msg.formatted;
-      hasTelegramMessage = true;
+      drainedTelegram.push(msg);
     }
+    const hasTelegramMessage = drainedTelegram.length > 0;
 
     // Check agent inbox
     const inboxMessages = checkInbox(this.paths);
@@ -682,8 +747,8 @@ export class FastChecker {
 
     // Inject if there's anything
     if (messageBlock) {
-      const injected = this.agent.injectMessage(messageBlock);
-      if (injected) {
+      const injectResult = this.agent.injectMessageDetailed(messageBlock);
+      if (injectResult.ok) {
         // ACK inbox messages
         for (const id of ackIds) {
           ackInbox(this.paths, id);
@@ -697,6 +762,24 @@ export class FastChecker {
         }
         // Cooldown after injection
         await sleep(5000);
+      } else if (drainedTelegram.length > 0) {
+        if (injectResult.code === 'NOT_RUNNING') {
+          // Agent not running (mid-restart). Re-queue the drained Telegram
+          // messages at the FRONT so they are retried next cycle and preserve
+          // original order. Inbox messages need no action — they were never
+          // ACK'd, so checkInbox redelivers them. Without this, mid-restart
+          // inbound Telegram is silently and permanently lost (offset already
+          // advanced).
+          this.telegramMessages.unshift(...drainedTelegram);
+          this.log(`Inject failed (${injectResult.code}); re-queued ${drainedTelegram.length} Telegram message(s)`);
+        } else {
+          // F6: DEDUPED is permanent for identical content — the MessageDedup
+          // hash window rejects the same block on every retry until unrelated
+          // content changes the hash. Re-queueing would retry (and log) every
+          // poll tick forever. Drop with a single log line instead; identical
+          // content was already injected within the dedup window.
+          this.log(`Inject deduped; dropped ${drainedTelegram.length} Telegram message(s) (duplicate of recently injected content)`);
+        }
       }
     }
 
@@ -711,8 +794,11 @@ export class FastChecker {
     // Context restart: fire --continue restart when pending flag is set and no in-progress tasks
     await this.checkPendingContextRestart();
 
-    // Gmail watch: check on configured interval (default 15 min)
-    await this.checkGmailWatch();
+    // NOTE (F8): Gmail watch is intentionally NOT checked here — it runs on
+    // its own timer (see start()) because its worst case exceeds the 30s
+    // pollCycle timeout. Slack/usage/context checks below stay in-cycle:
+    // each is bounded well under the timeout (10-15s execFile timeouts or
+    // local file reads) and moving Slack was explicitly out of scope.
 
     // Slack watch: check on configured interval (default 60 sec)
     await this.checkSlackWatch();
@@ -736,8 +822,10 @@ export class FastChecker {
    *      pending message and no idle flag) — passively frozen.
    */
   private watchdogCheck(): void {
-    if (this.watchdogTriggered) return;
     const now = Date.now();
+    const restartMarker = this.readWatchdogRestartMarker();
+    if (restartMarker.restartedAt > 0 && now - restartMarker.restartedAt < this.HARD_RESTART_COOLDOWN_MS) return;
+    if (this.watchdogTriggered) return;
     if (this.bootstrappedAt === 0 || now - this.bootstrappedAt < this.BOOTSTRAP_GRACE_MS) return;
     if (this.lastHardRestartAt > 0 && now - this.lastHardRestartAt < this.HARD_RESTART_COOLDOWN_MS) return;
 
@@ -746,13 +834,20 @@ export class FastChecker {
 
     let size: number;
     try { size = statSync(stdoutPath).size; } catch { return; }
+    let stdoutHighWater = restartMarker.stdoutHighWater;
+    if (stdoutHighWater > size) {
+      stdoutHighWater = 0;
+      if (restartMarker.restartedAt > 0) {
+        this.persistWatchdogRestartMarker(restartMarker.restartedAt, stdoutHighWater);
+      }
+    }
 
     if (size !== this.stdoutLastSize) {
       this.stdoutLastSize = size;
       this.stdoutLastChangeAt = now;
     }
 
-    // Read tail once — shared by Signal 1 and Signal 3
+    // Read tail once — shared by Signals 3 and 4
     let tail = '';
     try {
       const tailBytes = Math.min(20000, size);
@@ -766,20 +861,48 @@ export class FastChecker {
     } catch { /* non-critical */ }
 
     // Signal 1: session-survey prompt → immediate hard restart
-    if (tail && /How is Claude doing this session\?/.test(tail)) {
-      this.log('WATCHDOG: ctx-exhaustion survey prompt detected — hard-restarting');
-      this.triggerHardRestart('ctx exhaustion: session survey prompt in stdout');
-      return;
+    if (size > stdoutHighWater) {
+      let surveyTail = '';
+      try {
+        const start = stdoutHighWater;
+        const bytes = size - start;
+        if (bytes > 0) {
+          const fd = openSync(stdoutPath, 'r');
+          const buf = Buffer.alloc(bytes);
+          readSync(fd, buf, 0, bytes, start);
+          closeSync(fd);
+          surveyTail = buf.toString('utf-8');
+        }
+      } catch { /* non-critical */ }
+      if (surveyTail && /How is Claude doing this session\?/.test(surveyTail)) {
+        this.log('WATCHDOG: ctx-exhaustion survey prompt detected — hard-restarting');
+        this.triggerHardRestart('ctx exhaustion: session survey prompt in stdout', size);
+        return;
+      }
     }
 
     // Signal 3: context-threshold → proactive --continue restart at next task boundary
     if (tail && this.ctxThresholdPct > 0) {
       // Strip ANSI escape codes before applying the pattern
       const stripped = tail.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
-      const pctMatch = stripped.match(/\[(?:Sonnet|Opus|Haiku)[^\]]*\][^\d]*(\d+)%/);
+      // F7: anchor on the status-line "context" suffix — the real line is
+      // "[<Model>] <branch> · NN% context used", so a percent immediately
+      // followed by "context" on the same line is the reliable signal. This is
+      // model-agnostic (no Sonnet|Opus|Haiku pinning, which silently disabled
+      // Signal 3 for other model families) AND excludes the false positives the
+      // old badge-prefix shape let through — uppercase log tags like
+      // [INFO] 85%, [WARN] 90%, [ERROR] 95%, [BUILD] 88% have no "context"
+      // suffix so they no longer trigger a restart.
+      //   - percent and "context" must sit on the SAME line (the status line is
+      //     a single line)
+      //   - up to 15 chars between them absorbs the " " / " · " separators
+      //   - percent capped at 3 digits and sanity-checked <= 100 below
+      // Known acceptable residual: a literal "NN% context …" in prose (e.g.
+      // "85% context switches") is rare in agent stdout — not chased.
+      const pctMatch = stripped.match(/(\d{1,3})%[^\n]{0,15}context/);
       if (pctMatch) {
         const pct = parseInt(pctMatch[1], 10);
-        if (pct >= this.ctxThresholdPct) {
+        if (pct >= this.ctxThresholdPct && pct <= 100) {
           if (this.ctxThresholdTriggeredAt > 0 &&
               now - this.ctxThresholdTriggeredAt > this.CTX_THRESHOLD_FALLBACK_MS) {
             // Still at threshold after 15 min with no --continue restart — fallback hard restart
@@ -862,14 +985,27 @@ export class FastChecker {
     this.agent.sessionRefresh().catch(err => this.log(`Context restart failed: ${err}`));
   }
 
-  private triggerHardRestart(reason: string): void {
+  private triggerHardRestart(reason: string, stdoutHighWater?: number): void {
+    const status = this.agent.getStatus().status;
+    if (status === 'halted' || status === 'stopped') {
+      this.log(`WATCHDOG: refusing hard-restart in status=${status}: ${reason}`);
+      return;
+    }
     this.watchdogTriggered = true;
     this.lastHardRestartAt = Date.now();
     if (this.telegramApi && this.chatId) {
       this.telegramApi
         .sendMessage(this.chatId, `Got stuck (${reason}). Hard-restarting now.`)
+        .then(() => {
+          this.log(`Telegram watchdog hard-restart notification sent: ${reason}`);
+        })
         .catch(() => { /* non-critical */ });
     }
+    const currentMarker = this.readWatchdogRestartMarker();
+    this.persistWatchdogRestartMarker(
+      this.lastHardRestartAt,
+      stdoutHighWater ?? currentMarker.stdoutHighWater,
+    );
     // Preserve any recent handoff doc before the abrupt restart, same as the
     // metric-driven forceContextRestart (Tier 2/3) path. Without this, a
     // watchdog-triggered hard restart — including the cooperative ctx-threshold
@@ -878,6 +1014,28 @@ export class FastChecker {
     // 00:52Z forced restart.
     this.preserveRecentHandoffDoc();
     this.agent.hardRestartSelf(reason).catch(e => this.log(`hardRestartSelf failed: ${e}`));
+  }
+
+  private readWatchdogRestartMarker(): WatchdogRestartMarker {
+    try {
+      if (!existsSync(this.watchdogRestartMarkerFile)) return { restartedAt: 0, stdoutHighWater: 0 };
+      const raw = readFileSync(this.watchdogRestartMarkerFile, 'utf-8').trim();
+      const parsed = JSON.parse(raw) as Partial<WatchdogRestartMarker>;
+      return {
+        restartedAt: typeof parsed.restartedAt === 'number' && Number.isFinite(parsed.restartedAt) ? parsed.restartedAt : 0,
+        stdoutHighWater: typeof parsed.stdoutHighWater === 'number' && Number.isFinite(parsed.stdoutHighWater) ? parsed.stdoutHighWater : 0,
+      };
+    } catch {
+      return { restartedAt: 0, stdoutHighWater: 0 };
+    }
+  }
+
+  private persistWatchdogRestartMarker(restartedAt: number, stdoutHighWater: number): void {
+    try {
+      atomicWriteSync(this.watchdogRestartMarkerFile, JSON.stringify({ restartedAt, stdoutHighWater }));
+    } catch {
+      // Non-fatal: the in-memory cooldown still protects this FastChecker instance.
+    }
   }
 
   /**
@@ -1179,9 +1337,12 @@ export class FastChecker {
         }
         from = msg.username ?? 'unknown';
       }
+      // Coerce text: captionless file/photo shares deliver with no text field,
+      // so interpolating msg.text directly would render the literal string
+      // "undefined" in the inbox body (the socket listener already guards this).
       deliverable.push(
         `=== SLACK from ${from} (channel:${this.slackWatch.channel} ts:${msg.ts}) ===\n` +
-        `${msg.text}\n` +
+        `${msg.text ?? ''}\n` +
         `Reply using: cortextos bus send-slack ${this.slackWatch.channel} "<reply>"`,
       );
     }
@@ -1313,12 +1474,11 @@ export class FastChecker {
    * Matches bash fast-checker.sh format exactly.
    */
   private formatInboxMessage(msg: InboxMessage): string {
+    const from = sanitizeForPtyInjection(msg.from);
     const replyNote = msg.reply_to ? ` [reply_to: ${msg.reply_to}]` : '';
-    return `=== AGENT MESSAGE from ${msg.from}${replyNote} [msg_id: ${msg.id}] ===
-\`\`\`
-${msg.text}
-\`\`\`
-Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.id}
+    return `=== AGENT MESSAGE from ${from}${replyNote} [msg_id: ${msg.id}] ===
+${wrapFenceSafe(msg.text)}
+Reply using: cortextos bus send-message ${from} normal '<your reply>' ${msg.id}
 
 `;
   }
@@ -1338,27 +1498,27 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
   ): string {
     let replyCx = '';
     if (replyToText) {
-      replyCx = `[Replying to: "${replyToText.slice(0, 500)}"]\n`;
+      replyCx = `[Replying to: "${sanitizeForPtyInjection(replyToText.slice(0, 500))}"]\n`;
     }
 
     let lastSentCtx = '';
     if (lastSentText) {
-      lastSentCtx = `[Your last message: "${lastSentText.slice(0, 500)}"]\n`;
+      lastSentCtx = `[Your last message: "${sanitizeForPtyInjection(lastSentText.slice(0, 500))}"]\n`;
     }
 
     let historyCx = '';
     if (recentHistory) {
-      historyCx = `[Recent conversation:]\n${recentHistory}\n`;
+      historyCx = `[Recent conversation:]\n${sanitizeForPtyInjection(recentHistory)}\n`;
     }
 
     // Use [USER: ...] wrapper to prevent prompt injection via crafted display names
     // Slash commands (text starting with /) are NOT wrapped in backticks so Claude Code
     // can recognize and invoke them via the Skill tool (e.g. /loop, /commit, /restart).
-    const isSlashCommand = /^\/[a-zA-Z]/.test(text.trim());
+    const isSlashCommand = /^\/[a-zA-Z]/.test(stripControlChars(text).trim());
     const body = isSlashCommand
-      ? text.trim()
-      : `\`\`\`\n${text}\n\`\`\``;
-    return `=== TELEGRAM from [USER: ${from}] (chat_id:${chatId}) ===
+      ? sanitizeForPtyInjection(text).trim()
+      : wrapFenceSafe(text);
+    return `=== TELEGRAM from [USER: ${sanitizeForPtyInjection(from)}] (chat_id:${chatId}) ===
 ${replyCx}${historyCx}${body}
 ${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
@@ -1391,7 +1551,7 @@ ${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     const removed = newReaction.length === 0 && oldReaction.length > 0;
     const label = removed ? `removed ${render(oldReaction)}` : render(newReaction);
 
-    return `=== REACTION from [USER: ${from}] (chat_id:${chatId}) on message ${messageId}: ${label} ===
+    return `=== REACTION from [USER: ${sanitizeForPtyInjection(from)}] (chat_id:${chatId}) on message ${messageId}: ${label} ===
 
 `;
   }
@@ -1406,11 +1566,9 @@ ${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     caption: string,
     imagePath: string,
   ): string {
-    return `=== TELEGRAM PHOTO from ${from} (chat_id:${chatId}) ===
+    return `=== TELEGRAM PHOTO from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
 caption:
-\`\`\`
-${caption}
-\`\`\`
+${wrapFenceSafe(caption)}
 local_file: ${imagePath}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
@@ -1428,13 +1586,11 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     filePath: string,
     fileName: string,
   ): string {
-    return `=== TELEGRAM DOCUMENT from ${from} (chat_id:${chatId}) ===
+    return `=== TELEGRAM DOCUMENT from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
 caption:
-\`\`\`
-${caption}
-\`\`\`
+${wrapFenceSafe(caption)}
 local_file: ${filePath}
-file_name: ${fileName}
+file_name: ${sanitizeForPtyInjection(fileName)}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
 `;
@@ -1458,9 +1614,9 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
   ): string {
     const dur = duration !== undefined ? duration : 'unknown';
     const transcriptBlock = transcript && transcript.trim()
-      ? `transcript:\n\`\`\`\n${transcript.trim()}\n\`\`\`\n`
+      ? `transcript:\n${wrapFenceSafe(transcript.trim())}\n`
       : '';
-    return `=== TELEGRAM VOICE from ${from} (chat_id:${chatId}) ===
+    return `=== TELEGRAM VOICE from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
 duration: ${dur}s
 local_file: ${filePath}
 ${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
@@ -1481,14 +1637,12 @@ ${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<your repl
     duration: number | undefined,
   ): string {
     const dur = duration !== undefined ? duration : 'unknown';
-    return `=== TELEGRAM VIDEO from ${from} (chat_id:${chatId}) ===
+    return `=== TELEGRAM VIDEO from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
 caption:
-\`\`\`
-${caption}
-\`\`\`
+${wrapFenceSafe(caption)}
 duration: ${dur}s
 local_file: ${filePath}
-file_name: ${fileName}
+file_name: ${sanitizeForPtyInjection(fileName)}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
 `;
@@ -1557,13 +1711,10 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     // SECURITY: callbacks must come from the whitelisted user. Identical
     // check to handleCallback — approval clicks are as sensitive as
     // permission clicks and the same gate applies.
-    if (this.allowedUserId !== undefined) {
-      const fromUserId = query.from?.id;
-      if (fromUserId !== this.allowedUserId) {
-        this.log(`SECURITY: activity-channel callback from unauthorized user ${fromUserId} - rejecting`);
-        try { await activityApi.answerCallbackQuery(callbackQueryId, 'Not authorized'); } catch { /* ignore */ }
-        return;
-      }
+    if (!this.isAllowedTelegramUser(query.from?.id)) {
+      this.log(`SECURITY: activity-channel callback from unauthorized user ${query.from?.id} - rejecting`);
+      try { await activityApi.answerCallbackQuery(callbackQueryId, 'Not authorized'); } catch { /* ignore */ }
+      return;
     }
 
     const apprMatch = data.match(/^appr_(allow|deny)_(approval_\d+_[a-zA-Z0-9]+)$/);
@@ -1641,12 +1792,9 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
     // SECURITY: callbacks must come from the whitelisted user. Without this,
     // anyone who sees a button (forwarded message, group, etc.) could click it.
-    if (this.allowedUserId !== undefined) {
-      const fromUserId = query.from?.id;
-      if (fromUserId !== this.allowedUserId) {
-        this.log(`SECURITY: callback from unauthorized user ${fromUserId} - rejecting`);
-        return;
-      }
+    if (!this.isAllowedTelegramUser(query.from?.id)) {
+      this.log(`SECURITY: callback from unauthorized user ${query.from?.id} - rejecting`);
+      return;
     }
 
     // Approval callbacks: appr_(allow|deny)_{approvalId}
@@ -2162,7 +2310,6 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     this.ctxThresholdTriggeredAt = 0;
     this.stdoutLastChangeAt = now;
     this.stdoutLastSize = 0;
-    this.lastHardRestartAt = 0;
     this.watchdogCircuitBroken = false;
     this.watchdogRestarts = [];
     this.watchdogCircuitBrokenAt = 0;

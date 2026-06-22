@@ -91,7 +91,7 @@ until you set up a fork later.
 Copy-paste this single line into your terminal:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/noogalabs/ascendops-install/main/install.mjs | node
+curl -fsSL https://raw.githubusercontent.com/noogalabs/ascendops/main/install.mjs | node
 ```
 
 > **Not comfortable in the terminal?** Paste this whole guide into Claude or
@@ -289,7 +289,7 @@ Check which path you're on:
 cd ~/ascendops && git remote -v
 ```
 
-- **You see both `origin` (your fork) and `upstream` (noogalabs/ascendops-install):** the
+- **You see both `origin` (your fork) and `upstream` (noogalabs/ascendops):** the
   installer forked for you. Two-way flow:
   - Pull our updates: `git pull upstream main`
   - Send yours back:
@@ -297,14 +297,14 @@ cd ~/ascendops && git remote -v
     git checkout -b feat/my-improvement
     # edits...
     git push origin feat/my-improvement
-    gh pr create --repo noogalabs/ascendops-install --base main
+    gh pr create --repo noogalabs/ascendops --base main
     ```
 - **You see only `upstream`:** plain-clone (pull-only) — `gh` wasn't authed at
   install. Pull updates with `git pull upstream main`. To enable contributing back:
   ```bash
   cd ~/ascendops
   gh auth login            # if you haven't
-  gh repo fork noogalabs/ascendops-install --remote
+  gh repo fork noogalabs/ascendops --remote
   ```
 
 The persona templates, PM integrations, and skills were built by operators with
@@ -316,7 +316,7 @@ real businesses. AscendOps gets better as you do.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `curl` install fails (HTTP error) | Network / rate limit | Wait a minute, retry. Or clone manually: `git clone https://github.com/noogalabs/ascendops-install.git ~/ascendops` then `node ~/ascendops/install.mjs` |
+| `curl` install fails (HTTP error) | Network / rate limit | Wait a minute, retry. Or clone manually: `git clone https://github.com/noogalabs/ascendops.git ~/ascendops` then `node ~/ascendops/install.mjs` |
 | `claude: command not found` | Claude Code not installed | `npm install -g @anthropic-ai/claude-code` then `claude login` (Step 1.2) |
 | `node: command not found` or version < 20 | Node.js missing/old | Install Node LTS from [nodejs.org](https://nodejs.org/) (Step 1.2) |
 | Installer says "gh installed but not authed" | No `gh auth login` | Run `gh auth login`, or accept the plain-clone fallback (fork later) |
@@ -338,7 +338,7 @@ troubleshoot a failed step by hand, the manual path produces the identical end
 state. Briefly:
 
 ```bash
-gh repo fork noogalabs/ascendops-install --clone --remote   # origin=fork, upstream=canonical
+gh repo fork noogalabs/ascendops --clone --remote   # origin=fork, upstream=canonical
 cd ascendops && npm install && npm run build
 node dist/cli.js --version                            # verify CLI
 node dist/cli.js init <your-org>                      # create your org

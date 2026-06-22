@@ -24,10 +24,7 @@ export function AgentAvatar({
   showName = false,
   className,
 }: AgentAvatarProps) {
-  // Use `||` (not `??`) so an empty-string emoji — e.g. an un-onboarded agent
-  // whose IDENTITY.md emoji placeholder was stripped to "" — falls back to the
-  // name initial instead of rendering a blank avatar.
-  const fallbackText = emoji || name.charAt(0).toUpperCase();
+  const fallbackText = emoji ?? name.charAt(0).toUpperCase();
 
   return (
     <span className={cn('inline-flex items-center gap-2', className)}>

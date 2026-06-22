@@ -3,8 +3,8 @@ import { IPCServer } from './ipc-server.js';
 import { readdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from 'fs';
 import { spawnSync } from 'child_process';
 import { join } from 'path';
-import { homedir } from 'os';
 import { ensureDir } from '../utils/atomic.js';
+import { resolveCanonicalCtxRoot } from '../utils/paths.js';
 
 // Each fast-checker registers a process-level SIGUSR1 handler (see
 // fast-checker.ts:102). With >10 active agents the default Node listener cap
@@ -279,7 +279,7 @@ class Daemon {
   constructor() {
     this.instanceId = process.env.CTX_INSTANCE_ID || 'default';
     // Always derive ctxRoot from instanceId to avoid inheriting a parent cortextOS's CTX_ROOT
-    this.ctxRoot = join(homedir(), '.cortextos', this.instanceId);
+    this.ctxRoot = resolveCanonicalCtxRoot(this.instanceId);
   }
 
   async start(): Promise<void> {
@@ -346,14 +346,14 @@ class Daemon {
     // Create agent manager
     this.agentManager = new AgentManager(this.instanceId, this.ctxRoot, frameworkRoot, org);
 
-    // Start IPC server
-    this.ipcServer = new IPCServer(this.agentManager, this.instanceId);
-    await this.ipcServer.start();
-
-    // Discover and start agents
-    await this.agentManager.discoverAndStart();
-
-    console.log(`[daemon] Running (pid: ${process.pid})`);
+    // F2 fix: register shutdown-signal + fatal-error handlers BEFORE any boot
+    // work (IPC server start + serial multi-agent discoverAndStart, which can
+    // take minutes). A SIGTERM or crash arriving DURING boot must still run
+    // stopAll() and write crash markers — otherwise every already-started
+    // agent's SessionEnd hook fires a false CRASH alert and no crash history
+    // is recorded. The handlers only need ctxRoot/frameworkRoot/pidFile
+    // (all available here) and null-check agentManager/ipcServer, so early
+    // registration is safe.
 
     // Handle shutdown signals
     const shutdown = async () => {
@@ -431,6 +431,17 @@ class Daemon {
         unlinkSync(pidFile);
       } catch { /* ignore */ }
     });
+
+    // --- Boot work begins only AFTER all handlers above are installed (F2) ---
+
+    // Start IPC server
+    this.ipcServer = new IPCServer(this.agentManager, this.instanceId);
+    await this.ipcServer.start();
+
+    // Discover and start agents
+    await this.agentManager.discoverAndStart();
+
+    console.log(`[daemon] Running (pid: ${process.pid})`);
   }
 }
 

@@ -146,36 +146,6 @@ describe('parseIdentityMd / serializeIdentityMd', () => {
     expect(fields.name).toBe('');
     expect(fields.role).toBe('');
   });
-
-  it('strips HTML-comment placeholders so un-onboarded template fields resolve to ""', () => {
-    const template = [
-      '# Agent Identity',
-      '',
-      '## Name',
-      '<!-- Agent name (set during onboarding) -->',
-      '',
-      '## Role',
-      '<!-- What this agent does (e.g., content creator, dev ops, researcher) -->',
-      '',
-      '## Emoji',
-      '<!-- Optional emoji identifier -->',
-      '',
-      '## Vibe',
-      '<!-- Personality: casual, formal, technical, creative, etc. -->',
-      '',
-    ].join('\n');
-    const { fields } = parseIdentityMd(template);
-    expect(fields.name).toBe('');
-    expect(fields.role).toBe('');
-    expect(fields.emoji).toBe('');
-    expect(fields.vibe).toBe('');
-  });
-
-  it('keeps real content while stripping a placeholder comment', () => {
-    const mixed = '## Name\n<!-- set during onboarding -->\nAlex\n';
-    const { fields } = parseIdentityMd(mixed);
-    expect(fields.name).toBe('Alex');
-  });
 });
 
 // ---------------------------------------------------------------------------

@@ -179,7 +179,7 @@ After workflows and tools are configured:
 12. **Confirm heartbeat cadence:**
     > "My heartbeat runs every 4 hours and flags in-progress tasks with no updates after 2 hours. Does that work, or do you want a longer window for your type of work?"
 
-    If the user wants a different heartbeat interval, update `config.json` crons array (heartbeat entry interval).
+    If the user wants a different heartbeat interval, update the daemon-managed heartbeat cron with `cortextos bus update-cron $CTX_AGENT_NAME heartbeat --interval <interval>`.
     If they want a different stale task window (default 2h), note it in MEMORY.md — the agent applies it judgmentally during HEARTBEAT.md Step 3.
 
 13. **Knowledge base setup — ALWAYS DO THIS STEP:**
@@ -232,7 +232,7 @@ After workflows and tools are configured:
       "$CTX_AGENT_DIR/IDENTITY.md" \
       --org $CTX_ORG --scope private \
       --agent $CTX_AGENT_NAME \
-      --collection "memory-$CTX_AGENT_NAME" --force
+      --force
     ```
 
     Ingest any additional files the user specified in their answers.

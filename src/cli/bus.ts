@@ -2,8 +2,9 @@ import { Command } from 'commander';
 import { spawnSync, execFileSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
-import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
-import { validateAgentName } from '../utils/validate.js';
+import { sendMessage, checkInbox, ackInbox, pruneProcessed, PROCESSED_TTL_DAYS, PROCESSED_TTL_MIN_DAYS } from '../bus/message.js';
+import { agentExists } from '../bus/agents.js';
+import { validateAgentName, isValidJson } from '../utils/validate.js';
 import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
@@ -28,9 +29,10 @@ import { createSkillPr } from '../bus/skill-autopr.js';
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
+import { resolveCommsLintRules, type ResolvedCommsLintRules } from '../bus/comms-lint-config.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
-import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
+import { logOutboundMessage, cacheLastSent, rotateMessageLogIfNeeded } from '../telegram/logging.js';
 import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
 
 /**
@@ -76,46 +78,38 @@ type OutboundLintResult = {
   ok: boolean;
   phrase?: string;
   reason?: string;
+  suggest?: string;
 };
 
-const BANNED_POSTURE_PATTERNS: RegExp[] = [
-  /\bsleep posture\b/i,
-  /\bstanding by\b/i,
-  /\bstandby\b/i,
-  /\bparked\b/i,
-  /\bon-?deck\b/i,
-  /\bidle\b/i,
-  /\basleep\b/i,
-  /\bsleeping\b/i,
-  /\bwaiting[- ]on[- ]\w+\b/i,
-  /\bholding\b/i,
-];
+// The banned/passive/telegram/agent-name rule data formerly lived as
+// module-level `const` arrays here. It now lives in the loader's defaults
+// (src/bus/comms-lint-config.ts). The lint functions below accept a resolved
+// rule set so per-org / per-agent config can override the defaults; with no
+// config, resolveCommsLintRules({}) returns the byte-for-byte defaults so
+// behavior is unchanged. See master plan §4.5 for the config schema.
 
-const PASSIVE_POSTURE_PATTERNS: RegExp[] = [
-  /\b(standing by|standby|parked|idle|asleep|sleeping|holding)\b/i,
-  /\bwaiting\b/i,
-];
-
-const ACTIVE_WORK_CONTEXT = /\b(working on|implementing|building|testing|reviewing|shipping|debugging|patching|running|opened pr|pr #|commit\b|merging|validating)\b/i;
-const NEXT_SIGNAL_CONTEXT = /\b(next dispatch|next heartbeat|when .* (lands|arrives|finishes)|after .* (lands|arrives|finishes)|upon .* (signal|review|feedback))\b/i;
-
-function lintOutboundMessage(text: string): OutboundLintResult {
-  for (const re of BANNED_POSTURE_PATTERNS) {
-    const m = text.match(re);
+function lintOutboundMessage(text: string, rules: ResolvedCommsLintRules): OutboundLintResult {
+  for (const rule of rules.banned) {
+    const m = text.match(rule.pattern);
     if (m) {
       return {
         ok: false,
         phrase: m[0],
         reason: 'banned jargon',
+        suggest: rule.suggest,
       };
     }
   }
 
-  const hasPassive = PASSIVE_POSTURE_PATTERNS.some((re) => re.test(text));
+  const hasPassive = rules.passive.some((r) => r.pattern.test(text));
   if (hasPassive) {
-    const hasActiveContext = ACTIVE_WORK_CONTEXT.test(text) || NEXT_SIGNAL_CONTEXT.test(text);
+    const hasActiveContext = rules.activeContext.test(text) || rules.nextSignalContext.test(text);
     if (!hasActiveContext) {
-      const m = text.match(PASSIVE_POSTURE_PATTERNS[0]) || text.match(PASSIVE_POSTURE_PATTERNS[1]);
+      let m: RegExpMatchArray | null = null;
+      for (const r of rules.passive) {
+        m = text.match(r.pattern);
+        if (m) break;
+      }
       return {
         ok: false,
         phrase: m?.[0] ?? 'passive posture framing',
@@ -127,9 +121,84 @@ function lintOutboundMessage(text: string): OutboundLintResult {
   return { ok: true };
 }
 
-function enforceOutboundLintOrExit(text: string, skipLint: boolean | undefined): void {
-  if (skipLint) return;
-  const result = lintOutboundMessage(text);
+/**
+ * Prints a result envelope, then FAILS LOUD: exit 1 on an unambiguous failure
+ * status so shell callers / crons checking $? see the failure. Only 'error' and
+ * 'conflict' are universal failures; valid non-success states (up_to_date, ok,
+ * dry_run, installed, submitted, contributed, merged, clean, empty,
+ * already_exists) intentionally stay exit 0 to avoid false-positive regressions
+ * on reads/idempotent ops. extraFailStatuses lets a specific handler add its own
+ * failure status (e.g. prepare-submission treats 'pii_detected' as a block).
+ *
+ * Exported for unit testing (process.exit is spied); handlers call it internally.
+ */
+export function emitResult(result: unknown, extraFailStatuses: string[] = []): void {
+  console.log(JSON.stringify(result, null, 2));
+  const status = (result && typeof result === 'object')
+    ? (result as { status?: unknown }).status
+    : undefined;
+  if (typeof status === 'string'
+      && (status === 'error' || status === 'conflict' || extraFailStatuses.includes(status))) {
+    // Drain-safe: set the exit code and let the top-level CLI completion route
+    // through finalizeProcess() (which flushes piped stdout before exiting). A
+    // raw process.exit(1) here would truncate the un-flushed JSON envelope that
+    // $()-capturing consumers read — corrupting the very output this fix makes
+    // reliable. See src/cli/_finalize.ts.
+    process.exitCode = 1;
+  }
+}
+
+/**
+ * Resolve the comms-lint rule set for the current agent/org context. Reads
+ * per-org and per-agent config (fail-open to defaults). Never throws.
+ */
+function resolveLintRules(): ResolvedCommsLintRules {
+  const env = resolveEnv();
+  return resolveCommsLintRules({
+    org: env.org,
+    agentDir: env.agentDir,
+    frameworkRoot: env.frameworkRoot,
+  });
+}
+
+/**
+ * Print a --suggest dry-run report to stdout and never send. On a would-be
+ * block, surface the offending phrase + the rewrite hint (suggest) or reason.
+ * On a clean message, print a "would pass" confirmation. Either way the caller
+ * must NOT proceed to send (dry-run means dry-run).
+ */
+function printSuggestReport(result: OutboundLintResult): void {
+  if (!result.ok) {
+    const phrase = result.phrase ?? 'unknown';
+    const hint = result.suggest ?? result.reason ?? 'policy violation';
+    console.log(
+      `[--suggest] Would be BLOCKED. Offending phrase: "${phrase}". Suggestion: ${hint}`,
+    );
+  } else {
+    console.log('[--suggest] Would pass comms-lint cleanly (not sent — dry-run).');
+  }
+}
+
+/**
+ * Enforce the base outbound lint at a send site.
+ *
+ * Returns `true` when the caller should PROCEED to send, `false` when it must
+ * RETURN WITHOUT sending. `--skip-lint` short-circuits to proceed. `--suggest`
+ * prints a dry-run report and ALWAYS returns false (never sends). Default
+ * (no flags): block + process.exit(1) on fail, proceed on pass.
+ */
+function enforceOutboundLintOrExit(
+  text: string,
+  skipLint: boolean | undefined,
+  opts?: { suggest?: boolean },
+): boolean {
+  if (skipLint) return true;
+  const rules = resolveLintRules();
+  const result = lintOutboundMessage(text, rules);
+  if (opts?.suggest) {
+    printSuggestReport(result);
+    return false;
+  }
   if (!result.ok) {
     const phrase = result.phrase ?? 'unknown';
     const reason = result.reason ?? 'policy violation';
@@ -140,91 +209,53 @@ function enforceOutboundLintOrExit(text: string, skipLint: boolean | undefined):
     );
     process.exit(1);
   }
+  return true;
 }
 
 // ─── Telegram-only plain-talk patterns (locked 2026-05-22 by Dane C5 dispatch) ───
 // These fire ONLY on send-telegram (outbound to David). Agent-to-agent bus
-// comms stay technical/jargon-permissive — the new patterns catch engineer-
-// speak that confuses non-technical recipients.
-
-type TelegramLintRule = {
-  pattern: RegExp;
-  reason: string;
-  suggest?: string;
-};
-
-const TELEGRAM_BANNED_PATTERNS: TelegramLintRule[] = [
-  {
-    pattern: /\bpr #\d+\b/i,
-    reason: 'PR number leak (David tracks features not PR numbers)',
-    suggest: 'reference the feature/fix by what it does, e.g. "the migration" not "PR #45"',
-  },
-  {
-    pattern: /\bpull request #\d+\b/i,
-    reason: 'PR number leak',
-    suggest: 'reference the feature/fix by what it does',
-  },
-  {
-    // SHA shape: 7-40 hex chars AND must contain at least one a-f letter.
-    // Without the letter requirement the regex matched plain numeric IDs
-    // (phone numbers, dollar amounts, version codes) and blocked valid
-    // Telegram messages. (Aussie + Codex bot catch on PR #51, 2026-05-23.)
-    pattern: /\b(?=[0-9a-f]{7,40}\b)[0-9a-f]*[a-f][0-9a-f]*\b/i,
-    reason: 'commit SHA leak (engineer-speak)',
-    suggest: 'drop the SHA — describe the change instead',
-  },
-  {
-    pattern: /\bcortextos\b/i,
-    reason: 'framework brand leak (cortextos is the internal framework name)',
-    suggest: 'use "AscendOps" (the product David knows)',
-  },
-  {
-    // Em-dash, en-dash, and horizontal bar. David hard rule 2026-05-30:
-    // "we do not use em dashes ever in human communication and writing" —
-    // they read as machine-written and break trust. Regular hyphen-minus
-    // (U+002D) is intentionally NOT matched, so compounds and ranges are fine.
-    pattern: /[–—―]/,
-    reason: 'em-dash banned (reads as AI-written, David hard rule 2026-05-30)',
-    suggest: 'use a comma, period, or parentheses instead, never a long dash',
-  },
-];
-
-const AGENT_NAME_PATTERN: TelegramLintRule = {
-  pattern: /\b(codie|collie|dane|aussie|blue|codex)\b/i,
-  reason: 'agent name in outbound Telegram (David usually wants the outcome not which agent shipped it)',
-  suggest: 'rephrase to describe the work, OR pass --explicit-naming to allow when naming is intentional',
-};
+// comms stay technical/jargon-permissive — the patterns catch engineer-speak
+// that confuses non-technical recipients. Rule data now lives in the loader
+// defaults (rules.telegram, rules.agentName); see src/bus/comms-lint-config.ts.
 
 function lintOutboundTelegramMessage(
   text: string,
   explicitNaming: boolean,
+  rules: ResolvedCommsLintRules,
 ): OutboundLintResult {
   // First run the standard outbound lint (banned jargon + passive posture).
-  const baseResult = lintOutboundMessage(text);
+  const baseResult = lintOutboundMessage(text, rules);
   if (!baseResult.ok) return baseResult;
 
   // Then run Telegram-only banned patterns.
-  for (const rule of TELEGRAM_BANNED_PATTERNS) {
+  for (const rule of rules.telegram) {
     const m = text.match(rule.pattern);
     if (m) {
       return {
         ok: false,
         phrase: m[0],
+        // Fold suggest into reason for backward-compatible stderr text (the
+        // em-dash here is internal CLI output, not a David-facing send), AND
+        // surface suggest separately for --suggest.
         reason: rule.suggest ? `${rule.reason} — ${rule.suggest}` : rule.reason,
+        suggest: rule.suggest,
       };
     }
   }
 
-  // Agent names: BLOCK by default, but allow when caller asserts --explicit-naming.
-  if (!explicitNaming) {
-    const m = text.match(AGENT_NAME_PATTERN.pattern);
+  // Agent names: BLOCK by default, but allow when caller asserts
+  // --explicit-naming. If the agent-name rule was allowlisted away
+  // (rules.agentName === null), skip the gate entirely.
+  if (!explicitNaming && rules.agentName) {
+    const m = text.match(rules.agentName.pattern);
     if (m) {
       return {
         ok: false,
         phrase: m[0],
-        reason: AGENT_NAME_PATTERN.suggest
-          ? `${AGENT_NAME_PATTERN.reason} — ${AGENT_NAME_PATTERN.suggest}`
-          : AGENT_NAME_PATTERN.reason,
+        reason: rules.agentName.suggest
+          ? `${rules.agentName.reason} — ${rules.agentName.suggest}`
+          : rules.agentName.reason,
+        suggest: rules.agentName.suggest,
       };
     }
   }
@@ -232,13 +263,23 @@ function lintOutboundTelegramMessage(
   return { ok: true };
 }
 
+/**
+ * Enforce the Telegram outbound lint at a send site. Same proceed/return-false
+ * contract as enforceOutboundLintOrExit (see its docstring).
+ */
 function enforceTelegramLintOrExit(
   text: string,
   skipLint: boolean | undefined,
   explicitNaming: boolean | undefined,
-): void {
-  if (skipLint) return;
-  const result = lintOutboundTelegramMessage(text, !!explicitNaming);
+  opts?: { suggest?: boolean },
+): boolean {
+  if (skipLint) return true;
+  const rules = resolveLintRules();
+  const result = lintOutboundTelegramMessage(text, !!explicitNaming, rules);
+  if (opts?.suggest) {
+    printSuggestReport(result);
+    return false;
+  }
   if (!result.ok) {
     const phrase = result.phrase ?? 'unknown';
     const reason = result.reason ?? 'policy violation';
@@ -248,6 +289,7 @@ function enforceTelegramLintOrExit(
     );
     process.exit(1);
   }
+  return true;
 }
 
 function resolveAgentBusPaths(agentOverride?: string) {
@@ -260,6 +302,60 @@ function resolveAgentBusPaths(agentOverride?: string) {
   };
 }
 
+/**
+ * Fail-loud recipient gate shared by all CLI messaging sites (send-message,
+ * create-task/update-task --assignee, notify-agent).
+ *
+ * Returns `true` when it is safe to PROCEED with the side effect, `false` when
+ * the caller must RETURN WITHOUT the side effect (the gate has already printed
+ * the error and set process.exitCode = 1).
+ *
+ * Drain-safety: this runs BEFORE any stdout JSON envelope is written, so the
+ * actionable error goes to stderr and exitCode=1 is set; the top-level
+ * finalizeProcess() still drains and exits with that code. No raw process.exit.
+ *
+ * Semantics (see agentExists / EDGE CASES):
+ *   - exists                 → proceed (exit 0).
+ *   - --force                → proceed even if unknown (pre-provisioning), exit 0;
+ *                              prints a warning so the operator sees the override.
+ *   - unknown + resolvable   → FAIL LOUD: stderr error listing available agents,
+ *                              exitCode 1, return false (no side effect).
+ *   - unknown + UNresolvable → DEGRADE SAFE (fleet-brick guard): warn that the
+ *                              agent list could not be resolved, proceed exit 0.
+ */
+function assertRecipientOrFail(
+  recipient: string,
+  ctxRoot: string,
+  org: string | undefined,
+  force: boolean | undefined,
+): boolean {
+  const probe = agentExists(recipient, ctxRoot, org);
+  if (probe.exists) return true;
+
+  if (!probe.resolvable) {
+    // Fresh install / no orgs dir / empty registry — cannot verify. Degrade
+    // safely so a real send is never blocked by an unresolvable universe.
+    console.error(
+      `Warning: could not resolve the agent list to verify '${recipient}' (fresh install or no orgs dir). Proceeding without verification.`
+    );
+    return true;
+  }
+
+  if (force) {
+    console.error(
+      `Warning: agent '${recipient}' not found, but --force was passed — proceeding (pre-provisioning).`
+    );
+    return true;
+  }
+
+  console.error(
+    `Error: agent '${recipient}' not found. Available agents: ${probe.available.join(', ') || '(none)'}. ` +
+    `Pass --force to proceed anyway (intentional pre-provisioning).`
+  );
+  process.exitCode = 1;
+  return false;
+}
+
 busCommand
   .command('send-message')
   .argument('<to>', 'Target agent')
@@ -268,7 +364,9 @@ busCommand
   .argument('[reply-to]', 'Reply to message ID (optional positional form)')
   .option('--reply-to <id>', 'Reply to message ID')
   .option('--skip-lint', 'Skip outbound comms lint (for quoting/post-mortems only)', false)
-  .action((to: string, priority: string, text: string, replyToArg: string | undefined, opts: { replyTo?: string; skipLint?: boolean }) => {
+  .option('--suggest', 'Dry-run: print the offending phrase + a rewrite hint and exit 0 without sending', false)
+  .option('--force', 'Send even if the recipient agent does not exist (intentional pre-provisioning)', false)
+  .action((to: string, priority: string, text: string, replyToArg: string | undefined, opts: { replyTo?: string; skipLint?: boolean; suggest?: boolean; force?: boolean }) => {
     // Accept reply-to as either positional arg or --reply-to flag (P2 fix #9)
     const effectiveReplyTo = opts.replyTo ?? replyToArg;
     const validPriorities: Priority[] = ['urgent', 'high', 'normal', 'low'];
@@ -286,27 +384,14 @@ busCommand
 
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    enforceOutboundLintOrExit(text, opts.skipLint);
+    if (!enforceOutboundLintOrExit(text, opts.skipLint, { suggest: opts.suggest })) return;
 
-    // Warn if target agent doesn't exist (check project dir)
-    const { existsSync } = require('fs');
-    const { join } = require('path');
-    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
-    const orgsDir = join(projectRoot, 'orgs');
-    let agentExists = false;
-    if (existsSync(orgsDir)) {
-      const { readdirSync } = require('fs');
-      try {
-        for (const org of readdirSync(orgsDir)) {
-          if (existsSync(join(orgsDir, org, 'agents', to))) {
-            agentExists = true;
-            break;
-          }
-        }
-      } catch { /* skip */ }
-    }
-    if (!agentExists) {
-      console.error(`Warning: agent '${to}' not found in project. Message will be queued but may never be read.`);
+    // Fail loud on an unknown recipient (no orphan inbox file, no event logged)
+    // BEFORE the sendMessage() side effect. --force restores warn-and-proceed
+    // for pre-provisioning; an unresolvable agent list degrades safely. See
+    // assertRecipientOrFail / agentExists.
+    if (!assertRecipientOrFail(to, env.ctxRoot, env.org, opts.force)) {
+      return;
     }
 
     const msgId = sendMessage(paths, env.agentName, to, priority as Priority, text, effectiveReplyTo);
@@ -340,6 +425,31 @@ busCommand
     console.log(`ACK'd ${id}`);
   });
 
+// F12 disk-leak fix: ackInbox moves messages into processed/{agent}/ forever
+// with no cleanup path (prod: 18k+ files / 72 MB). This sweep deletes acked
+// messages older than the TTL. Path-safe: only operates inside
+// {ctxRoot}/processed/ (see pruneProcessed in src/bus/message.ts).
+busCommand
+  .command('prune-processed')
+  .description('Delete acked (processed) inbox messages older than N days')
+  .option('--days <n>', 'Retention TTL in days (minimum 1)', String(PROCESSED_TTL_DAYS))
+  .option('--all-agents', 'Sweep every agent\'s processed/ dir in this instance, not just this agent', false)
+  .action((opts: { days?: string; allAgents?: boolean }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const days = parseInt(opts.days ?? String(PROCESSED_TTL_DAYS), 10);
+    if (!Number.isFinite(days) || days < PROCESSED_TTL_MIN_DAYS) {
+      console.error(`prune-processed: --days must be a number >= ${PROCESSED_TTL_MIN_DAYS} (got '${opts.days}')`);
+      process.exitCode = 1;
+      return;
+    }
+    const result = pruneProcessed(paths, days, { allAgents: opts.allAgents ?? false });
+    console.log(
+      `Pruned ${result.deleted} processed message(s) older than ${days} day(s) ` +
+      `(scanned ${result.scanned}, kept ${result.keptRecent} recent, ${result.errors} error(s))`,
+    );
+  });
+
 busCommand
   .command('create-task')
   .argument('<title>', 'Task title')
@@ -350,9 +460,17 @@ busCommand
   .option('--needs-approval', 'Require human approval before execution')
   .option('--blocked-by <ids>', 'Comma-separated task IDs that must complete before this task can progress')
   .option('--blocks <ids>', 'Comma-separated task IDs that this new task will block (symmetric reverse edge)')
-  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string }) => {
+  .option('--force', 'Create even if the --assignee agent does not exist (intentional pre-provisioning)', false)
+  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string; force?: boolean }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    // Fail loud on a phantom assignee BEFORE createTask() — no task is created
+    // assigned to a non-existent agent. Self-assign skips the check (edge #3).
+    if (opts.assignee && opts.assignee !== env.agentName) {
+      if (!assertRecipientOrFail(opts.assignee, env.ctxRoot, env.org, opts.force)) {
+        return;
+      }
+    }
     const parseList = (raw?: string) => (raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []);
     const taskId = createTask(paths, env.agentName, env.org, title, {
       description: opts.desc,
@@ -378,7 +496,8 @@ busCommand
   .argument('<id>', 'Task ID')
   .argument('<status>', 'New status (pending, in_progress, completed, blocked, cancelled)')
   .option('--assignee <agent>', 'Reassign the task to a different agent (alongside the status update)')
-  .action((id: string, status: string, opts: { assignee?: string }) => {
+  .option('--force', 'Reassign even if the --assignee agent does not exist (intentional pre-provisioning)', false)
+  .action((id: string, status: string, opts: { assignee?: string; force?: boolean }) => {
     const validStatuses: TaskStatus[] = ['pending', 'in_progress', 'completed', 'blocked', 'cancelled'];
     if (!validStatuses.includes(status as TaskStatus)) {
       console.error(`Invalid status '${status}'. Must be one of: ${validStatuses.join(', ')}`);
@@ -395,6 +514,14 @@ busCommand
       if (err) {
         console.error(err);
         process.exit(1);
+      }
+    }
+
+    // Fail loud on a phantom assignee BEFORE updateTask() — no reassignment to a
+    // non-existent agent. Self-assign skips the check (edge #3).
+    if (opts.assignee && opts.assignee !== env.agentName) {
+      if (!assertRecipientOrFail(opts.assignee, env.ctxRoot, env.org, opts.force)) {
+        return;
       }
     }
 
@@ -619,6 +746,19 @@ busCommand
     if (!validSeverities.includes(severity as EventSeverity)) {
       console.error(`Invalid severity '${severity}'. Must be one of: ${validSeverities.join(', ')}`);
       process.exit(1);
+    }
+    // Fail loud on a PASSED-but-malformed --meta. An absent --meta defaults to
+    // '{}' (always valid), so this only trips on a string the caller actually
+    // supplied that is not valid JSON — never on the no-flag case. Without this,
+    // logEvent would silently drop the bad JSON (meta stays {}) and still report
+    // success, hiding the caller's mistake from any $?-checking cron/skill.
+    if (!isValidJson(opts.meta)) {
+      // Drain-safe: set exit code + return (do NOT log the event). A raw
+      // process.exit here would truncate the piped error envelope. See
+      // src/cli/_finalize.ts.
+      console.log(JSON.stringify({ status: 'error', error: `invalid --meta JSON: ${opts.meta}` }, null, 2));
+      process.exitCode = 1;
+      return;
     }
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
@@ -898,7 +1038,10 @@ busCommand
     const env = resolveEnv();
     const projectDir = env.projectRoot || env.frameworkRoot || process.cwd();
     const report = autoCommit(projectDir, opts.dryRun ?? false);
-    console.log(JSON.stringify(report));
+    // emitResult fails loud (exit 1) if autoCommit ever returns status 'error'/
+    // 'conflict'; valid states (clean, nothing_to_stage, dry_run, staged) stay
+    // exit 0. Drain-safe — sets exitCode, never raw exit after the envelope.
+    emitResult(report);
   });
 
 busCommand
@@ -925,7 +1068,11 @@ busCommand
     if (success) {
       console.log('Activity posted');
     } else {
+      // Fail loud: postActivity returns false on missing config / send failure.
+      // Previously this printed to stderr but exited 0, so callers checking $?
+      // treated a dropped activity post as success.
       console.error('Failed to post activity. Check that ACTIVITY_CHAT_ID is set in your org secrets.env or .env file.');
+      process.exitCode = 1; // drain-safe (see src/cli/_finalize.ts)
     }
   });
 
@@ -1085,7 +1232,7 @@ busCommand
       tag: opts.tag,
       search: opts.search,
     });
-    console.log(JSON.stringify(result, null, 2));
+    emitResult(result);
   });
 
 busCommand
@@ -1100,7 +1247,7 @@ busCommand
       dryRun: opts.dryRun,
       agentDir: env.agentDir,
     });
-    console.log(JSON.stringify(result, null, 2));
+    emitResult(result);
   });
 
 busCommand
@@ -1115,7 +1262,7 @@ busCommand
     const result = prepareSubmission(env.ctxRoot, type, sourcePath, name, {
       dryRun: opts.dryRun,
     });
-    console.log(JSON.stringify(result, null, 2));
+    emitResult(result, ['pii_detected']);
   });
 
 busCommand
@@ -1135,7 +1282,7 @@ busCommand
       author: opts.author,
       contribute: opts.contribute,
     });
-    console.log(JSON.stringify(result, null, 2));
+    emitResult(result);
   });
 
 busCommand
@@ -1167,7 +1314,7 @@ busCommand
     const env = resolveEnv();
     const frameworkRoot = env.frameworkRoot || env.projectRoot || process.cwd();
     const result = checkUpstream(frameworkRoot, { apply: opts.apply });
-    console.log(JSON.stringify(result, null, 2));
+    emitResult(result);
   });
 
 busCommand
@@ -1178,7 +1325,7 @@ busCommand
   .action(async (botToken: string, scanDirs: string[]) => {
     const commands = collectTelegramCommands(scanDirs);
     const result = await registerTelegramCommands(botToken, commands);
-    console.log(JSON.stringify(result, null, 2));
+    emitResult(result);
   });
 
 busCommand
@@ -1259,13 +1406,14 @@ busCommand
   .option('--file <path>', 'Send a document/file with caption (any file type)')
   .option('--plain-text', 'Skip Telegram Markdown parsing entirely. Use this when the message contains unescaped _, *, backtick, or [ that would otherwise trip the Markdown parser. Without this flag, sendMessage still retries once with parse_mode disabled on a parse-entity error — so it is purely an opt-in to save the retry roundtrip.', false)
   .option('--skip-lint', 'Skip outbound comms lint (for quoting/post-mortems only)', false)
+  .option('--suggest', 'Dry-run: print the offending phrase + a rewrite hint and exit 0 without sending', false)
   .option('--explicit-naming', 'Allow agent names in the message body (e.g. when David explicitly asked which agent did something)', false)
-  .action(async (chatId: string, message: string, opts: { image?: string; file?: string; plainText?: boolean; skipLint?: boolean; explicitNaming?: boolean }) => {
+  .action(async (chatId: string, message: string, opts: { image?: string; file?: string; plainText?: boolean; skipLint?: boolean; suggest?: boolean; explicitNaming?: boolean }) => {
     // Codex agents emit literal '\n'/'\t' inside single-quoted bash where bash
     // does not expand escapes, so they arrive at argv as 2-char literals and
     // Telegram renders them as visible text. Normalize before send + log.
     message = message.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
-    enforceTelegramLintOrExit(message, opts.skipLint, opts.explicitNaming);
+    if (!enforceTelegramLintOrExit(message, opts.skipLint, opts.explicitNaming, { suggest: opts.suggest })) return;
     // Resolve bot token: agent .env first, then process.env
     const env = resolveEnv();
     let botToken = '';
@@ -1328,6 +1476,54 @@ busCommand
       console.log('Message sent');
     } catch (err: any) {
       console.error(`Failed to send: ${err.message || err}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('react-telegram')
+  .description("Set the bot's reaction on a Telegram message (single emoji ack)")
+  .argument('<chat-id>', 'Telegram chat ID')
+  .argument('<message-id>', 'ID of the message to react to')
+  .argument('[emoji]', 'Reaction emoji (default: 👍). Pass an empty string to clear.', '👍')
+  .action(async (chatId: string, messageIdRaw: string, emoji: string) => {
+    const messageId = Number(messageIdRaw);
+    if (!Number.isFinite(messageId) || messageId <= 0) {
+      console.error(`Invalid message-id '${messageIdRaw}'. Must be a positive integer.`);
+      process.exit(1);
+    }
+
+    // Resolve bot token: agent .env first, then process.env (same flow as
+    // send-telegram so the agent identity / personality of the reaction
+    // matches the agent that owns the conversation).
+    const env = resolveEnv();
+    let botToken = '';
+    if (env.agentDir) {
+      const { readFileSync, existsSync } = require('fs');
+      const { join } = require('path');
+      const agentEnv = join(env.agentDir, '.env');
+      if (existsSync(agentEnv)) {
+        const content = readFileSync(agentEnv, 'utf-8');
+        const match = content.match(/^BOT_TOKEN=(.+)$/m);
+        if (match && match[1].trim()) botToken = match[1].trim();
+      }
+    }
+    if (!botToken) botToken = process.env.BOT_TOKEN || '';
+    if (!botToken) {
+      console.error('Error: BOT_TOKEN not configured. Set it in your agent .env file or as an environment variable to enable Telegram.');
+      process.exit(1);
+    }
+
+    const api = new TelegramAPI(botToken);
+    try {
+      // Empty string clears the reaction; otherwise send a single-emoji array.
+      // Telegram limits bots to one reaction per message; we treat that as the
+      // primitive here. Multi-emoji is a future feature if/when needed.
+      const emojis = emoji === '' ? [] : [emoji];
+      await api.setMessageReaction(chatId, messageId, emojis);
+      console.log(emojis.length > 0 ? `Reacted ${emoji}` : 'Reaction cleared');
+    } catch (err: any) {
+      console.error(`Failed to react: ${err.message || err}`);
       process.exit(1);
     }
   });
@@ -1808,12 +2004,20 @@ busCommand
   .description('Send urgent signal to another agent for immediate delivery via fast-checker')
   .argument('<agent>', 'Target agent name')
   .argument('<message>', 'Urgent message text')
-  .action((targetAgent: string, message: string) => {
+  .option('--force', 'Signal even if the target agent does not exist (intentional pre-provisioning)', false)
+  .action((targetAgent: string, message: string, opts: { force?: boolean }) => {
     const { mkdirSync, writeFileSync } = require('fs');
     const { join } = require('path');
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
+
+    // Fail loud on an unknown target BEFORE writing the .urgent-signal file — no
+    // orphan signal for a non-existent agent. --force / unresolvable degrade per
+    // assertRecipientOrFail. env.ctxRoot is the resolved root used for verification.
+    if (!assertRecipientOrFail(targetAgent, env.ctxRoot, env.org, opts.force)) {
+      return;
+    }
 
     // Write urgent signal file that fast-checker checks on every poll
     const signalDir = join(ctxRoot, 'state', targetAgent);
@@ -1909,6 +2113,7 @@ busCommand
 
     console.log(`Restarting ${targets.length} agent(s) with ${opts.stagger}s stagger: ${targets.join(', ')}`);
 
+    let failures = 0;
     for (let i = 0; i < targets.length; i++) {
       const agent = targets[i];
       if (i > 0) {
@@ -1920,15 +2125,28 @@ busCommand
       writeFileSync(join(stateDir, '.user-restart'), opts.reason);
 
       // Send IPC restart signal
-      const resp = await ipc.send({ type: 'restart-agent', agent, source: 'cortextos bus soft-restart-all' });
+      const resp = await ipc.send({
+        type: 'restart-agent',
+        agent,
+        source: 'cortextos bus soft-restart-all',
+        data: { fleetTotal: targets.length, fleetIndex: i },
+      });
       if (resp.success) {
         console.log(`[${i + 1}/${targets.length}] Restarted ${agent}`);
       } else {
+        failures++;
         console.error(`[${i + 1}/${targets.length}] Failed to restart ${agent}: ${resp.error}`);
       }
     }
 
-    console.log('soft-restart-all complete.');
+    // Fail loud: previously this always exited 0 even if every restart failed,
+    // so a cron checking $? could not tell a full failure from full success.
+    if (failures > 0) {
+      console.error(`soft-restart-all: ${failures}/${targets.length} agent restart(s) failed.`);
+      process.exitCode = 1; // drain-safe (see src/cli/_finalize.ts)
+    } else {
+      console.log('soft-restart-all complete.');
+    }
   });
 
 busCommand
@@ -1938,10 +2156,11 @@ busCommand
   .argument('<reply>', 'Reply text')
   .argument('[msg-id]', 'Inbox message ID to ACK')
   .option('--skip-lint', 'Skip outbound comms lint (for quoting/post-mortems only)', false)
-  .action((agent: string, reply: string, msgId?: string, opts?: { skipLint?: boolean }) => {
+  .option('--suggest', 'Dry-run: print the offending phrase + a rewrite hint and exit 0 without sending', false)
+  .action((agent: string, reply: string, msgId?: string, opts?: { skipLint?: boolean; suggest?: boolean }) => {
     // Same literal '\n'/'\t' normalize as send-telegram (codex agent fix).
     reply = reply.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
-    enforceOutboundLintOrExit(reply, opts?.skipLint);
+    if (!enforceOutboundLintOrExit(reply, opts?.skipLint, { suggest: opts?.suggest })) return;
     const { mkdirSync, appendFileSync } = require('fs');
     const { join } = require('path');
     const env = resolveEnv();
@@ -1957,7 +2176,9 @@ busCommand
       message_id: `mobile-reply-${Date.now()}`,
       type: 'text',
     });
-    appendFileSync(join(logDir, 'outbound-messages.jsonl'), entry + '\n');
+    const outboundLogPath = join(logDir, 'outbound-messages.jsonl');
+    rotateMessageLogIfNeeded(outboundLogPath); // F13: bound unbounded JSONL growth
+    appendFileSync(outboundLogPath, entry + '\n');
 
     // ACK the original inbox message
     if (msgId) {

@@ -7,13 +7,13 @@ triggers: ["morning scan", "morning meld review", "run morning scan", "check ope
 
 # PM Morning Scan
 
-> Run once per morning before the 07:30 briefing. Output goes to Dane, not David directly (unless emergency).
+> Run once per morning before the 07:30 briefing. Output goes to your orchestrator, not the owner directly (unless emergency).
 
 ---
 
 ## When to Run
 
-Triggered by morning cron at 06:30 ET, or manually on demand. Results feed Dane's 07:30 morning review.
+Triggered by morning cron at 06:30 ET, or manually on demand. Results feed your orchestrator's 07:30 morning review.
 
 ---
 
@@ -51,7 +51,7 @@ From the full list, keep only melds that meet at least one condition:
 
 Skip melds that have:
 - Vendor assigned AND scheduled date set
-- A regional-manager note or Blue comment within last 6h
+- A your regional contact note or the PM agent comment within last 6h
 - Pest control classification with vendor search open
 
 ---
@@ -66,7 +66,7 @@ python3 scripts/pm-get-comments.py <meld_id>
 
 After reading thread, classify with pm-meld-triage rules:
 - Is it actually unhandled, or does the thread show it's in progress?
-- out-of-area property? → route to the regional manager
+- your special-routing region property? → route to your regional contact
 - Habitability override condition? → escalate immediately, don't wait for report
 
 Discard any candidate where thread reveals it is already actively managed.
@@ -92,17 +92,17 @@ Group by priority: Emergency → High → Normal → Low.
 
 ---
 
-## Step 5: Send to Dane
+## Step 5: Send to your orchestrator
 
 ```bash
-cortextos bus send-message dane normal "Morning Meld Scan — $(date +%Y-%m-%d)
+cortextos bus send-message <orchestrator> normal "Morning Meld Scan — $(date +%Y-%m-%d)
 
 Open melds reviewed: <total>
 Flagged for action: <N>
 
 <report lines>
 
-out-of-area items (route to the regional manager): <count>
+your special-routing region items (route to your regional contact): <count>
 Emergencies: <count or 'none'>
 ---
 Ready for dispatch decisions."
@@ -110,24 +110,24 @@ Ready for dispatch decisions."
 
 If zero items flagged:
 ```bash
-cortextos bus send-message dane normal "Morning Meld Scan — $(date +%Y-%m-%d): All <N> open melds accounted for. No unhandled items."
+cortextos bus send-message <orchestrator> normal "Morning Meld Scan — $(date +%Y-%m-%d): All <N> open melds accounted for. No unhandled items."
 ```
 
 ---
 
-## Step 6: Log Escalation Outcomes (Aussie Cycle 7)
+## Step 6: Log Escalation Outcomes (optional quality-tracking)
 
-For each meld that was escalated in a **previous** scan and now has a confirmed resolution (status changed, vendor assigned, David/Dane/the regional manager acted), append one JSON line to the outcomes surface:
+For each meld that was escalated in a **previous** scan and now has a confirmed resolution (status changed, vendor assigned, an operator acted), append one JSON line to your outcomes surface:
 
 ```bash
-OUTCOME_FILE="/Users/davidhunter/cortextos/orgs/ascendops/agents/aussie/experiments/surfaces/blue-quality-outcomes.jsonl"
+OUTCOME_FILE="${CTX_ROOT}/state/${CTX_AGENT_NAME}/surfaces/quality-outcomes.jsonl"
 
-echo '{"timestamp":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","escalation_id":"<meld_id>","outcome_type":"acted_as_recommended","surface":"morning_scan","actor":"david","resolution_time_minutes":null,"notes":"<brief context>"}' >> $OUTCOME_FILE
+echo '{"timestamp":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","escalation_id":"<meld_id>","outcome_type":"acted_as_recommended","surface":"morning_scan","actor":"<operator>","resolution_time_minutes":null,"notes":"<brief context>"}' >> $OUTCOME_FILE
 ```
 
 **outcome_type values:** `acted_as_recommended` | `modified` | `dismissed`
 
-Only log confirmed outcomes — skip melds still pending or with unknown resolution. Schema: `orgs/ascendops/agents/aussie/experiments/surfaces/outcome-schema.md`
+Only log confirmed outcomes — skip melds still pending or with unknown resolution. Define your outcome schema alongside the surface file.
 
 ---
 
@@ -144,7 +144,7 @@ cortextos bus update-heartbeat "morning scan complete — <N> melds flagged"
 
 ## Emergencies: Don't Wait for the Report
 
-If at any point during Steps 1–3 you find a meld meeting a habitability override condition (see pm-meld-triage), message David on Telegram immediately — do not batch it into the 06:30 report.
+If at any point during Steps 1–3 you find a meld meeting a habitability override condition (see pm-meld-triage), message the owner on Telegram immediately — do not batch it into the 06:30 report.
 
 ```bash
 cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID "URGENT: <meld_id> — <condition>. <property>. Action needed now."
@@ -154,11 +154,11 @@ cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID "URGENT: <meld_id> — <condit
 
 ## Self-Check Before Sending
 
-Before sending the report to Dane, verify:
+Before sending the report to your orchestrator, verify:
 
 - [ ] Did I read the thread for every flagged meld (not just the title)?
 - [ ] Did I suppress pest control melds with open vendor searches?
-- [ ] Did I route out-of-area items to the regional manager, not the standard queue?
+- [ ] Did I route your special-routing region items to your regional contact, not the standard queue?
 - [ ] Are zero genuinely-handled melds in the flagged list?
 - [ ] Did any habitability conditions get caught and escalated already?
 

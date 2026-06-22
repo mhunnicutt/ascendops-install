@@ -80,6 +80,42 @@ const TURN_PERMISSION_OVERRIDES = {
   sandboxPolicy: { type: 'dangerFullAccess' },
 } as const;
 
+// Codex model entitlement guard. gpt-5.3-codex (and -spark) are chatgpt-auth-
+// unsafe: the codex-app-server ChatGPT account is not entitled to them, so a
+// turn on that model 400s every time (willRetry:false). The codex-app-server
+// protocol takes `model` as a TOP-LEVEL field on thread/start, thread/resume
+// AND turn/start; when it is null/omitted the CLI picks its OWN default, which
+// on codex-cli 0.130.0 is gpt-5.3-codex — the exact failure that took codie
+// down 2026-06-04 (every turn 400). We therefore ALWAYS send an explicit,
+// allowlisted model on every thread/turn request (never null). Mirrors the
+// hermes codex adapter's SAFE_MODELS gate for the app-server path.
+//
+// ENTITLEMENT NOTE (2026-06-04, proven by billed live turns): this ChatGPT
+// account is NOT entitled to the codex-specialized models — BOTH gpt-5.3-codex
+// AND gpt-5-codex return 400 "not supported when using Codex with a ChatGPT
+// account". gpt-5.5 (general) is the only entitled/working executor model here,
+// so it is the DEFAULT. gpt-5-codex is kept in SAFE_MODELS deliberately as the
+// one-config-edit switch-back: if the Codex plan is upgraded to entitle it, set
+// an agent's config.model=gpt-5-codex (the better executor) and resolveSafeModel
+// will pass it through. The DEFAULT must always be an entitled model — an earlier
+// gpt-5-codex default was an unproven assumption that 400'd; gpt-5.5 is proven.
+const SAFE_MODELS: readonly string[] = ['gpt-5.5', 'gpt-5-codex'];
+const DEFAULT_SAFE_MODEL = 'gpt-5.5';
+
+/**
+ * Resolve the model to send on a codex-app-server thread/turn request.
+ * Returns the configured model only if it is on the entitlement allowlist;
+ * otherwise falls back to DEFAULT_SAFE_MODEL. NEVER returns null/undefined —
+ * an absent model lets the CLI pick its own (unsafe) default, which is the bug
+ * this guard exists to prevent.
+ */
+export function resolveSafeModel(configured: string | undefined): string {
+  if (configured && SAFE_MODELS.includes(configured)) {
+    return configured;
+  }
+  return DEFAULT_SAFE_MODEL;
+}
+
 const SOCKET_BASENAME = 'codex.sock';
 const SOCKET_PATH_WARN_BYTES = 100;
 const BOOTSTRAP_PATTERN = '[codex-app-server] ready';
@@ -142,6 +178,41 @@ export class CodexAppServerPTY {
     this._socketListenArg = socket.listenArg;
     this._socketCwd = socket.cwd;
     this._outputBuffer = new OutputBuffer(1000, logPath, BOOTSTRAP_PATTERN);
+    this.warnIfModelGated();
+  }
+
+  /**
+   * Observable downgrade (no silent failure): if an explicit config.model is set
+   * but is NOT on the SAFE_MODELS allowlist, every thread/turn request gates it
+   * down to DEFAULT_SAFE_MODEL (see resolveSafeModel). Surface that ONCE at
+   * construction — via the agent log AND a dashboard event — so a genuinely
+   * entitled new model that needs adding to SAFE_MODELS is visible rather than
+   * silently downgraded. Warn-once (not per-resolve) avoids per-turn spam.
+   */
+  private warnIfModelGated(): void {
+    const configured = this._config.model;
+    if (!configured || SAFE_MODELS.includes(configured)) return;
+    const msg = `[codex-app-server] WARNING: configured model '${configured}' is not in SAFE_MODELS [${SAFE_MODELS.join(', ')}] — using ${DEFAULT_SAFE_MODEL}. Add it to SAFE_MODELS if it is genuinely entitled.`;
+    this._outputBuffer.push(msg + '\n');
+    try {
+      const paths = resolvePaths(this._env.agentName, this._env.instanceId, this._env.org);
+      logEvent(
+        paths,
+        this._env.agentName,
+        this._env.org,
+        'action',
+        'codex_model_gated_to_safe_default',
+        'warning',
+        {
+          runtime: 'codex-app-server',
+          configured_model: configured,
+          used_model: DEFAULT_SAFE_MODEL,
+          safe_models: SAFE_MODELS,
+        },
+      );
+    } catch {
+      /* non-fatal: the event is observability only */
+    }
   }
 
   async spawn(mode: 'fresh' | 'continue', prompt: string): Promise<void> {
@@ -226,6 +297,9 @@ export class CodexAppServerPTY {
     if (this._exitFinalized) return;
     this._exitFinalized = true;
     this._alive = false;
+    // Flush any held-back partial-JWT tail — the stream is over, so the
+    // hold can never be resolved by a next chunk (see OutputBuffer.close).
+    this._outputBuffer.close();
     this._executing = false;
     this._writeBuffer = '';
     this._turnQueue = [];
@@ -349,9 +423,9 @@ export class CodexAppServerPTY {
       break;
     }
 
-    const fencedBlocks = [...beforeReply.matchAll(/```(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n```/g)];
+    const fencedBlocks = [...beforeReply.matchAll(/(`{3,})(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n\1/g)];
     if (fencedBlocks.length > 0) {
-      return wrap(fencedBlocks[fencedBlocks.length - 1]?.[1]?.trim() || null);
+      return wrap(fencedBlocks[fencedBlocks.length - 1]?.[2]?.trim() || null);
     }
 
     for (let i = lines.length - 1; i >= 0; i -= 1) {
@@ -367,11 +441,14 @@ export class CodexAppServerPTY {
   }
 
   private buildMediaPayload(mediaType: string, beforeReply: string): string | null {
-    const captionMatch = beforeReply.match(/caption:\s*\n```(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n```/);
-    const caption = captionMatch?.[1]?.trim() ?? '';
+    // Match a dynamically-sized fence (3+ backticks): wrapFenceSafe grows the
+    // fence to outlast any backtick run in the body, so the close must be the
+    // same length as the open (backreference \1). Group 2 is the body.
+    const captionMatch = beforeReply.match(/caption:\s*\n(`{3,})(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n\1/);
+    const caption = captionMatch?.[2]?.trim() ?? '';
 
-    const transcriptMatch = beforeReply.match(/transcript:\s*\n```(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n```/);
-    const transcript = transcriptMatch?.[1]?.trim() ?? '';
+    const transcriptMatch = beforeReply.match(/transcript:\s*\n(`{3,})(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n\1/);
+    const transcript = transcriptMatch?.[2]?.trim() ?? '';
 
     const localFileMatch = beforeReply.match(/^local_file:\s*(.+)$/m);
     const localFile = localFileMatch?.[1]?.trim() ?? '';
@@ -575,6 +652,7 @@ export class CodexAppServerPTY {
           const resumed = await this.request<ThreadResponse>('thread/resume', {
             threadId: persisted.threadId,
             cwd: this._cwd,
+            model: resolveSafeModel(this._config.model),
             ...THREAD_PERMISSION_OVERRIDES,
             config: { features: { goals: true } },
             excludeTurns: true,
@@ -592,6 +670,7 @@ export class CodexAppServerPTY {
         const resumed = await this.request<ThreadResponse>('thread/resume', {
           threadId: latest,
           cwd: this._cwd,
+          model: resolveSafeModel(this._config.model),
           ...THREAD_PERMISSION_OVERRIDES,
           config: { features: { goals: true } },
           excludeTurns: true,
@@ -604,6 +683,7 @@ export class CodexAppServerPTY {
 
     const started = await this.request<ThreadResponse>('thread/start', {
       cwd: this._cwd,
+      model: resolveSafeModel(this._config.model),
       ...THREAD_PERMISSION_OVERRIDES,
       config: { features: { goals: true } },
       sessionStartSource: 'startup',
@@ -648,7 +728,7 @@ export class CodexAppServerPTY {
   private async startTurn(input: unknown[]): Promise<void> {
     if (!this._threadId) throw new Error('No Codex app-server thread is active');
     const completion = this.createTurnCompletion();
-    await this.request('turn/start', { threadId: this._threadId, input, ...TURN_PERMISSION_OVERRIDES });
+    await this.request('turn/start', { threadId: this._threadId, input, model: resolveSafeModel(this._config.model), ...TURN_PERMISSION_OVERRIDES });
     await completion;
   }
 
@@ -943,7 +1023,10 @@ export class CodexAppServerPTY {
 
     const entry = {
       timestamp: new Date().toISOString(),
-      model: this._config.model || 'gpt-5-codex',
+      // Log the model we actually SEND on the turn (resolveSafeModel), not the
+      // raw config — keeps the token-log label honest with the request so it
+      // can never mask an unsafe-model default again.
+      model: resolveSafeModel(this._config.model),
       input_tokens: typeof total.inputTokens === 'number' ? total.inputTokens : 0,
       output_tokens: typeof total.outputTokens === 'number' ? total.outputTokens : 0,
       cache_read_tokens: typeof total.cachedInputTokens === 'number' ? total.cachedInputTokens : 0,

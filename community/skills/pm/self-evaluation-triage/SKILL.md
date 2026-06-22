@@ -1,7 +1,7 @@
 ---
 name: self-evaluation-triage
 effort: low
-description: "After every meld decision, capture what was decided and why (trajectory). Weekly: scan all trajectories for override patterns, surface refinement candidates to Dane."
+description: "After every meld decision, capture what was decided and why (trajectory). Weekly: scan all trajectories for override patterns, surface refinement candidates to your orchestrator."
 triggers: ["self evaluation", "reflect", "override review", "accuracy review", "refinement candidates", "post-meld review", "decision review"]
 ---
 
@@ -28,14 +28,14 @@ cortextos bus log-event quality triage_trajectory info \
     \"vendor_recommended\": \"<vendor name or in-house>\",
     \"decision_summary\": \"<one sentence: what was recommended and why>\",
     \"outcome\": \"pending|resolved|overridden|cancelled\",
-    \"override_detail\": \"<what David changed, or null if outcome=resolved>\"
+    \"override_detail\": \"<what the owner changed, or null if outcome=resolved>\"
   }"
 ```
 
 **outcome** starts as `pending`. Update it when:
 - Meld closes with vendor completing work → `resolved`
-- David changes the vendor or urgency → `overridden` (fill override_detail)
-- Meld cancelled by resident or David → `cancelled`
+- the owner changes the vendor or urgency → `overridden` (fill override_detail)
+- Meld cancelled by resident or the owner → `cancelled`
 
 ### When to Update Outcome
 
@@ -56,7 +56,7 @@ cortextos bus log-event quality triage_outcome_update info \
 
 ## Part 2: Weekly Reflection Scan
 
-Runs every Monday at 06:00 ET (add to config.json cron if not present). Also triggers on demand via `/reflect` or Dane message.
+Runs every Monday at 06:00 ET (register with `cortextos bus add-cron <agent> self-evaluation-triage "0 6 * * 1" "Read and follow .claude/skills/pm/self-evaluation-triage/SKILL.md"` if not present). Also triggers on demand via `/reflect` or your orchestrator message.
 
 ### Step 1 — Pull All Trajectories
 
@@ -67,27 +67,27 @@ cortextos bus list-events --type quality --subtype triage_trajectory --since 7d 
 ### Step 2 — Identify Override Patterns
 
 For each overridden trajectory:
-- What was Blue's recommendation?
-- What did David change?
-- Is this the 2nd or 3rd time David made the same correction?
+- What was the PM agent's recommendation?
+- What did the owner change?
+- Is this the 2nd or 3rd time the owner made the same correction?
 
 Patterns to flag:
 | Pattern | Threshold | Action |
 |---------|-----------|--------|
 | Same vendor swapped out | 2+ times same swap | Refinement candidate: update vendor preference in MEMORY.md |
-| Urgency downgraded by David | 3+ times same meld type | Refinement candidate: recalibrate urgency rule for that type |
-| Urgency upgraded by David | 2+ times | Refinement candidate: tighten habitability or safety keyword list |
+| Urgency downgraded by the owner | 3+ times same meld type | Refinement candidate: recalibrate urgency rule for that type |
+| Urgency upgraded by the owner | 2+ times | Refinement candidate: tighten habitability or safety keyword list |
 | Scope underestimated | 2+ times same pattern | Refinement candidate: update planning-decompose common patterns |
 
-### Step 3 — Surface Refinement Candidates to Dane
+### Step 3 — Surface Refinement Candidates to your orchestrator
 
 ```bash
-cortextos bus send-message dane normal "Weekly triage reflection — Blue. Decisions last 7 days: <total>. Overrides: <count>. Patterns: <list each pattern found>. Refinement candidates: <list proposed changes>. No action needed from you unless a change requires approval."
+cortextos bus send-message <orchestrator> normal "Weekly triage reflection — the PM agent. Decisions last 7 days: <total>. Overrides: <count>. Patterns: <list each pattern found>. Refinement candidates: <list proposed changes>. No action needed from you unless a change requires approval."
 ```
 
 If no overrides in the past 7 days: send a brief confirmation only:
 ```bash
-cortextos bus send-message dane normal "Weekly triage reflection — Blue. 0 overrides in last 7 days. No refinement candidates."
+cortextos bus send-message <orchestrator> normal "Weekly triage reflection — the PM agent. 0 overrides in last 7 days. No refinement candidates."
 ```
 
 ---
@@ -101,7 +101,7 @@ Track confidence ratings from the copilot threshold log against actual outcomes:
 - `low` confidence + `resolved` outcome → calibrated correctly (appropriate uncertainty)
 - `medium` confidence + `overridden` 3+ times same type → recalibrate: that type should be `low`
 
-Include a calibration summary in the weekly Dane message when 10+ trajectories have resolved outcomes.
+Include a calibration summary in the weekly your orchestrator message when 10+ trajectories have resolved outcomes.
 
 ---
 
@@ -110,7 +110,7 @@ Include a calibration summary in the weekly Dane message when 10+ trajectories h
 - Never update an outcome to `resolved` without checking PM for actual meld closure
 - Never send a refinement candidate that bypasses an existing guardrail
 - Reflection scan is observation only — no rule changes happen automatically
-- If override pattern involves tenant safety (habitability upgrades), surface to Dane immediately, don't wait for Monday
+- If override pattern involves tenant safety (habitability upgrades), surface to your orchestrator immediately, don't wait for Monday
 
 ---
 

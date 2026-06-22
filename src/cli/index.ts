@@ -6,6 +6,7 @@ import { initCommand } from './init.js';
 import { addAgentCommand } from './add-agent.js';
 import { startCommand } from './start.js';
 import { stopCommand } from './stop.js';
+import { restartCommand } from './restart.js';
 import { statusCommand } from './status.js';
 import { doctorCommand } from './doctor.js';
 import { busCommand } from './bus.js';
@@ -27,6 +28,8 @@ import { importAgentCommand } from './import-agent.js';
 import { botCommand } from './bot.js';
 import { detectChatIdCommand } from './detect-chat-id.js';
 import { finalizeProcess } from './_finalize.js';
+import { updateCommand } from './update.js';
+import { supportAccessCommand } from './support-access.js';
 
 const program = new Command();
 
@@ -40,6 +43,7 @@ program.addCommand(installCommand);
 program.addCommand(addAgentCommand);
 program.addCommand(startCommand);
 program.addCommand(stopCommand);
+program.addCommand(restartCommand);
 program.addCommand(statusCommand);
 program.addCommand(doctorCommand);
 program.addCommand(busCommand);
@@ -62,7 +66,9 @@ program.addCommand(listWorkersCommand);
 program.addCommand(injectWorkerCommand);
 program.addCommand(importAgentCommand);
 program.addCommand(botCommand);
+program.addCommand(updateCommand);
 program.addCommand(detectChatIdCommand);
+program.addCommand(supportAccessCommand);
 
 // crash-alert: SessionEnd hook — cross-platform replacement for crash-alert.sh
 const crashAlertCommand = new Command('crash-alert')
@@ -80,7 +86,10 @@ program.addCommand(crashAlertCommand);
 // without truncating un-flushed piped stdout. See ./_finalize.ts.
 program
   .parseAsync(process.argv)
-  .then(() => finalizeProcess(0))
+  // Respect a handler-set non-zero exit code (e.g. emitResult / fail-loud
+  // handlers set process.exitCode = 1 instead of a raw process.exit so the
+  // piped stdout envelope is drained before exit — see ./_finalize.ts).
+  .then(() => finalizeProcess(typeof process.exitCode === 'number' ? process.exitCode : 0))
   .catch((err: unknown) => {
     console.error(err instanceof Error ? err.message : String(err));
     finalizeProcess(1);

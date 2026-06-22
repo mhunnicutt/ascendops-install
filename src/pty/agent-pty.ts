@@ -37,6 +37,12 @@ export class AgentPTY {
   private config: AgentConfig;
   private onExitHandler: ((exitCode: number, signal?: number) => void) | null = null;
   private spawnFn: SpawnFn | null = null;
+  // Trust-prompt auto-accept timers. Stored so they can be cancelled when
+  // the PTY exits or is killed — otherwise a timer from a previous spawn()
+  // can fire against a RESPAWNED PTY on the same instance and write a stray
+  // Enter into the new session (the callbacks only check `this.pty`, which
+  // is truthy again after a respawn).
+  private trustPromptTimers: ReturnType<typeof setTimeout>[] = [];
 
   constructor(env: CtxEnv, config: AgentConfig, logPath?: string, bootstrapPattern?: string) {
     this.env = env;
@@ -170,6 +176,13 @@ export class AgentPTY {
     this.pty.onExit(({ exitCode, signal }) => {
       this._alive = false;
       this.pty = null;
+      // Flush any held-back partial-JWT tail — the stream is over, so the
+      // hold can never be resolved by a next chunk. Writes an explicit
+      // marker (or the bare prefix fragment) instead of dropping bytes.
+      this.outputBuffer.close();
+      // Cancel pending trust-prompt timers — the PTY they targeted is gone,
+      // and they must not fire against a future respawn on this instance.
+      this.clearTrustPromptTimers();
       if (this.onExitHandler) {
         this.onExitHandler(exitCode, signal);
       }
@@ -184,26 +197,44 @@ export class AgentPTY {
     // 1. "Trust this folder?" — Enter accepts (option 1 already selected)
     // 2. "New MCP server found" — Enter accepts (option 1 "Use this MCP server" selected)
     // 3. "Bypass Permissions mode WARNING" — ↓ then Enter (option 1 is "No,exit"; must reach option 2 "Yes,Iaccept")
-    const acceptDialog = () => {
-      if (!this.pty) return;
-      const raw = this.outputBuffer.getRecent();
-      const stripped = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\x1b[()][AB012]/g, '');
-      if (stripped.includes('BypassPermissions') || stripped.includes('Yes,Iaccept') ||
-          stripped.includes('bypass permissions') || stripped.includes('No,exit')) {
-        // Navigate down to "Yes, I accept" then confirm with Enter
-        this.pty.write('\x1b[B'); // down arrow
-        setTimeout(() => { if (this.pty) this.pty.write('\r'); }, 300);
-      } else if (stripped.includes('trust') || stripped.includes('MCPserver') ||
-                 stripped.includes('MCP server') || stripped.includes('Entertoconfirm') ||
-                 stripped.includes('Enter to confirm')) {
-        this.pty.write('\r');
+    //
+    // Skipped for runtimes that never show these prompts (Hermes overrides needsTrustPromptAutoAccept).
+    if (this.needsTrustPromptAutoAccept()) {
+      const acceptDialog = () => {
+        if (!this.pty) return;
+        const raw = this.outputBuffer.getRecent();
+        const stripped = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\x1b[()][AB012]/g, '');
+        if (stripped.includes('BypassPermissions') || stripped.includes('Yes,Iaccept') ||
+            stripped.includes('bypass permissions') || stripped.includes('No,exit')) {
+          // Navigate down to "Yes, I accept" then confirm with Enter
+          try { this.pty.write('\x1b[B'); } catch { /* PTY torn down */ }
+          setTimeout(() => { try { if (this.pty) this.pty.write('\r'); } catch { /* ignore */ } }, 300);
+        } else if (stripped.includes('trust') || stripped.includes('MCPserver') ||
+                   stripped.includes('MCP server') || stripped.includes('Entertoconfirm') ||
+                   stripped.includes('Enter to confirm')) {
+          try { this.pty.write('\r'); } catch { /* PTY torn down */ }
+        }
+      };
+      for (const delayMs of [3000, 5000, 8000, 12000, 17000]) {
+        this.trustPromptTimers.push(setTimeout(acceptDialog, delayMs));
       }
-    };
-    setTimeout(acceptDialog, 3000);
-    setTimeout(acceptDialog, 5000);
-    setTimeout(acceptDialog, 8000);
-    setTimeout(acceptDialog, 12000);
-    setTimeout(acceptDialog, 17000);
+    }
+  }
+
+  /**
+   * Whether this runtime shows a "trust this folder?" prompt that the
+   * daemon should auto-accept. Claude Code does; Hermes does not
+   * (HermesPTY overrides this to return false).
+   */
+  protected needsTrustPromptAutoAccept(): boolean {
+    return true;
+  }
+
+  private clearTrustPromptTimers(): void {
+    for (const timer of this.trustPromptTimers) {
+      clearTimeout(timer);
+    }
+    this.trustPromptTimers = [];
   }
 
   /**
@@ -265,11 +296,24 @@ export class AgentPTY {
    * Kill the PTY process.
    */
   kill(): void {
+    // Cancel pending trust-prompt timers unconditionally — even if the PTY
+    // is already gone, stale timers must not survive into a respawn.
+    this.clearTrustPromptTimers();
     const pty = this.pty;
     if (pty) {
       this._alive = false;
       this.pty = null;
-      pty.kill();
+      try {
+        pty.kill();
+      } catch {
+        // The process may have exited between the null-check and the kill;
+        // a throw here must not propagate into stop()/restart paths.
+      }
+      // Belt-and-suspenders: onExit normally fires after kill and flushes
+      // the held tail, but if the event loop tears down first (daemon
+      // shutdown) the hold would be lost. close() is idempotent, so the
+      // subsequent onExit flush is a no-op.
+      this.outputBuffer.close();
     }
   }
 

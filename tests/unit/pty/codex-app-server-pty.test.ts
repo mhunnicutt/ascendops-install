@@ -121,6 +121,7 @@ vi.mock('../../../src/bus/event.js', () => ({
 }));
 
 const { CodexAppServerPTY } = await import('../../../src/pty/codex-app-server-pty.js');
+const { FastChecker } = await import('../../../src/daemon/fast-checker.js');
 
 const mockEnv = {
   instanceId: 'test',
@@ -230,7 +231,7 @@ describe('CodexAppServerPTY command mapping', () => {
   it('maps Telegram-delivered /goal with bot suffix to native goal get', async () => {
     requestMock.mockResolvedValue({ result: { goal: null } });
     const pty = makeReadyPty();
-    pty.write(`=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
+    pty.write(`=== TELEGRAM from [USER: James] (chat_id:1234567890) ===
 [Recent conversation:]
 [user]: prior
 \`\`\`
@@ -238,7 +239,7 @@ old fenced text
 \`\`\`
 /goal@codex_app_server_test_bot
 [Your last message: "previous"]
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `);
     pty.write('\r');
     await Promise.resolve();
@@ -253,16 +254,16 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
       .mockResolvedValueOnce({ result: { cleared: true } });
     const pty = makeReadyPty();
 
-    pty.write(`=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
+    pty.write(`=== TELEGRAM from [USER: James] (chat_id:1234567890) ===
 /goal@codex_app_server_test_bot Ship native slash routing
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `);
     pty.write('\r');
     await Promise.resolve();
 
-    pty.write(`=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
+    pty.write(`=== TELEGRAM from [USER: James] (chat_id:1234567890) ===
 /goal clear
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `);
     pty.write('\r');
     await Promise.resolve();
@@ -288,46 +289,46 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     requestMock.mockResolvedValue({ result: { goal: null } });
     const pty = makeReadyPty();
     const sendMessage = vi.fn().mockResolvedValue(undefined);
-    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '7940429114');
+    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '1234567890');
     pty.write('/goal');
     pty.write('\r');
     await Promise.resolve();
-    expect(sendMessage).toHaveBeenCalledWith('7940429114', '[goal] none set', undefined, { parseMode: null });
+    expect(sendMessage).toHaveBeenCalledWith('1234567890', '[goal] none set', undefined, { parseMode: null });
   });
 
   it('mirrors /goal set reply to Telegram when handle is bound', async () => {
     requestMock.mockResolvedValue({ result: { goal: { status: 'active' } } });
     const pty = makeReadyPty();
     const sendMessage = vi.fn().mockResolvedValue(undefined);
-    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '7940429114');
+    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '1234567890');
     pty.write('/goal Ship native slash routing');
     pty.write('\r');
     await Promise.resolve();
-    expect(sendMessage).toHaveBeenCalledWith('7940429114', '[goal] active: Ship native slash routing', undefined, { parseMode: null });
+    expect(sendMessage).toHaveBeenCalledWith('1234567890', '[goal] active: Ship native slash routing', undefined, { parseMode: null });
   });
 
   it('mirrors /goal clear reply to Telegram when handle is bound', async () => {
     requestMock.mockResolvedValue({ result: { cleared: true } });
     const pty = makeReadyPty();
     const sendMessage = vi.fn().mockResolvedValue(undefined);
-    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '7940429114');
+    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '1234567890');
     pty.write('/goal clear');
     pty.write('\r');
     await Promise.resolve();
-    expect(sendMessage).toHaveBeenCalledWith('7940429114', '[goal] cleared', undefined, { parseMode: null });
+    expect(sendMessage).toHaveBeenCalledWith('1234567890', '[goal] cleared', undefined, { parseMode: null });
   });
 
   it('mirrors unknown $skill error to Telegram when handle is bound', async () => {
     requestMock.mockResolvedValue({ result: { data: [{ cwd: '/tmp', skills: [{ name: 'imagegen', path: '/skill.md', enabled: true }] }] } });
     const pty = makeReadyPty();
     const sendMessage = vi.fn().mockResolvedValue(undefined);
-    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '7940429114');
+    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '1234567890');
     pty.write('$nonexistent_skill');
     pty.write('\r');
     await Promise.resolve();
     await Promise.resolve();
     expect(sendMessage).toHaveBeenCalledWith(
-      '7940429114',
+      '1234567890',
       '[skill] unknown "nonexistent_skill". No enabled matches found.',
       undefined,
       { parseMode: null },
@@ -354,11 +355,11 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
       .mockResolvedValueOnce({ result: {} });
     const pty = makeReadyPty();
 
-    pty.write(`=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
+    pty.write(`=== TELEGRAM from [USER: James] (chat_id:1234567890) ===
 \`\`\`
 $imagegen make a logo
 \`\`\`
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `);
     pty.write('\r');
     await Promise.resolve();
@@ -370,6 +371,7 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     });
     expect(requestMock).toHaveBeenNthCalledWith(2, 'turn/start', {
       threadId: 'thread-1',
+      model: 'gpt-5.5',
       input: [
         { type: 'skill', name: 'imagegen', path: '/skill.md' },
         { type: 'text', text: 'make a logo', text_elements: [] },
@@ -400,6 +402,7 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     });
     expect(requestMock).toHaveBeenNthCalledWith(2, 'turn/start', {
       threadId: 'thread-1',
+      model: 'gpt-5.5',
       input: [
         { type: 'skill', name: 'imagegen', path: '/skill.md' },
         { type: 'text', text: 'make a logo', text_elements: [] },
@@ -435,6 +438,7 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     });
     expect(requestMock).toHaveBeenNthCalledWith(2, 'turn/start', {
       threadId: 'thread-1',
+      model: 'gpt-5.5',
       input: [{ type: 'skill', name: 'heartbeat', path: '/h.md' }],
       approvalPolicy: 'never',
       sandboxPolicy: { type: 'dangerFullAccess' },
@@ -457,13 +461,13 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     });
     const pty = makeReadyPty();
     const sendMessage = vi.fn().mockResolvedValue(undefined);
-    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '7940429114');
+    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '1234567890');
     pty.write('/notaskill');
     pty.write('\r');
     await Promise.resolve();
     await Promise.resolve();
     expect(sendMessage).toHaveBeenCalledWith(
-      '7940429114',
+      '1234567890',
       '[skill] unknown "notaskill". No enabled matches found.',
       undefined,
       { parseMode: null },
@@ -488,6 +492,7 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
 
     expect(requestMock).toHaveBeenNthCalledWith(2, 'turn/start', {
       threadId: 'thread-1',
+      model: 'gpt-5.5',
       input: [
         { type: 'skill', name: 'heartbeat', path: '/h.md' },
         { type: 'text', text: 'extra context here', text_elements: [] },
@@ -501,11 +506,11 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     requestMock.mockResolvedValue({ result: {} });
     const pty = makeReadyPty();
 
-    pty.write(`=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
+    pty.write(`=== TELEGRAM from [USER: James] (chat_id:1234567890) ===
 \`\`\`
 Hello? Are you working right?
 \`\`\`
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `);
     pty.write('\r');
     await Promise.resolve();
@@ -516,7 +521,7 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     expect(call[0]).toBe('turn/start');
     const text = (call[1] as { input: Array<{ text: string }> }).input[0].text;
     expect(text).toContain('Hello? Are you working right?');
-    expect(text).toContain("cortextos bus send-telegram 7940429114 '<your reply>'");
+    expect(text).toContain("cortextos bus send-telegram 1234567890 '<your reply>'");
     expect(text).toContain('Do not reply through the codex channel.');
   });
 
@@ -530,9 +535,9 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
       .mockResolvedValueOnce({ result: {} });
     const pty = makeReadyPty();
 
-    pty.write(`=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
+    pty.write(`=== TELEGRAM from [USER: James] (chat_id:1234567890) ===
 /heartbeat
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `);
     pty.write('\r');
     await Promise.resolve();
@@ -540,6 +545,7 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
 
     expect(requestMock).toHaveBeenNthCalledWith(2, 'turn/start', {
       threadId: 'thread-1',
+      model: 'gpt-5.5',
       input: [{ type: 'skill', name: 'heartbeat', path: '/h.md' }],
       approvalPolicy: 'never',
       sandboxPolicy: { type: 'dangerFullAccess' },
@@ -558,6 +564,7 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     expect(requestMock).toHaveBeenCalledTimes(1);
     expect(requestMock).toHaveBeenLastCalledWith('turn/start', {
       threadId: 'thread-1',
+      model: 'gpt-5.5',
       input: [{ type: 'text', text: 'first', text_elements: [] }],
       approvalPolicy: 'never',
       sandboxPolicy: { type: 'dangerFullAccess' },
@@ -575,6 +582,7 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     expect(requestMock).toHaveBeenCalledTimes(2);
     expect(requestMock).toHaveBeenLastCalledWith('turn/start', {
       threadId: 'thread-1',
+      model: 'gpt-5.5',
       input: [{ type: 'text', text: 'second', text_elements: [] }],
       approvalPolicy: 'never',
       sandboxPolicy: { type: 'dangerFullAccess' },
@@ -602,13 +610,13 @@ describe('CodexAppServerPTY extractTelegramPayload media types', () => {
   }
 
   it('photo: surfaces both caption and local_file path', () => {
-    const inject = `=== TELEGRAM PHOTO from James (chat_id:7940429114) ===
+    const inject = `=== TELEGRAM PHOTO from James (chat_id:1234567890) ===
 caption:
 \`\`\`
 what's in this image
 \`\`\`
 local_file: telegram-images/2026-05-08_xyz.jpg
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
     const out = extract(inject);
     expect(out).toContain('[PHOTO]');
@@ -617,14 +625,14 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
   });
 
   it('document: surfaces caption + file_name + local_file', () => {
-    const inject = `=== TELEGRAM DOCUMENT from James (chat_id:7940429114) ===
+    const inject = `=== TELEGRAM DOCUMENT from James (chat_id:1234567890) ===
 caption:
 \`\`\`
 have a look at this PDF
 \`\`\`
 local_file: telegram-images/myfile.pdf
 file_name: myfile.pdf
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
     const out = extract(inject);
     expect(out).toContain('[DOCUMENT]');
@@ -634,10 +642,10 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
   });
 
   it('voice without transcript: surfaces local_file + duration but no transcript line', () => {
-    const inject = `=== TELEGRAM VOICE from James (chat_id:7940429114) ===
+    const inject = `=== TELEGRAM VOICE from James (chat_id:1234567890) ===
 duration: 5s
 local_file: telegram-images/voice_1234.ogg
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
     const out = extract(inject);
     expect(out).toContain('[VOICE]');
@@ -647,14 +655,14 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
   });
 
   it('voice with transcript: surfaces transcript text', () => {
-    const inject = `=== TELEGRAM VOICE from James (chat_id:7940429114) ===
+    const inject = `=== TELEGRAM VOICE from James (chat_id:1234567890) ===
 duration: 5s
 local_file: telegram-images/voice_1234.ogg
 transcript:
 \`\`\`
 say hi back
 \`\`\`
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
     const out = extract(inject);
     expect(out).toContain('[VOICE]');
@@ -663,7 +671,7 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
   });
 
   it('video: surfaces caption + file_name + local_file + duration', () => {
-    const inject = `=== TELEGRAM VIDEO from James (chat_id:7940429114) ===
+    const inject = `=== TELEGRAM VIDEO from James (chat_id:1234567890) ===
 caption:
 \`\`\`
 demo clip
@@ -671,7 +679,7 @@ demo clip
 duration: 12s
 local_file: telegram-images/video_1234.mp4
 file_name: video_1234.mp4
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
     const out = extract(inject);
     expect(out).toContain('[VIDEO]');
@@ -682,24 +690,74 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
   });
 
   it('plain-text TELEGRAM (no media token) preserves existing fenced-block behavior', () => {
-    const inject = `=== TELEGRAM from James (chat_id:7940429114) ===
+    const inject = `=== TELEGRAM from James (chat_id:1234567890) ===
 \`\`\`
 just a chat message
 \`\`\`
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
     const out = extract(inject);
     expect(out).toBe('just a chat message');
   });
 
+  it('round-trips dynamic-fenced Telegram text that contains a triple-backtick run', () => {
+    const body = [
+      'please inspect this',
+      '```',
+      'and keep this after the inner fence',
+    ].join('\n');
+    const inject = FastChecker.formatTelegramTextMessage(
+      'James',
+      '1234567890',
+      body,
+      '/tmp/framework',
+    );
+
+    expect(inject).toContain(['````', body, '````'].join('\n'));
+    expect(extract(inject)).toBe(body);
+  });
+
+  it('round-trips dynamic-fenced media captions and transcripts that contain triple-backtick runs', () => {
+    const caption = [
+      'caption before',
+      '```',
+      'caption after',
+    ].join('\n');
+    const photo = FastChecker.formatTelegramPhotoMessage(
+      'James',
+      '1234567890',
+      caption,
+      'telegram-images/photo.jpg',
+    );
+
+    expect(photo).toContain(['````', caption, '````'].join('\n'));
+    expect(extract(photo)).toContain(`caption: ${caption}`);
+
+    const transcript = [
+      'transcript before',
+      '```',
+      'transcript after',
+    ].join('\n');
+    const voice = FastChecker.formatTelegramVoiceMessage(
+      'James',
+      '1234567890',
+      'telegram-images/voice.ogg',
+      5,
+      transcript,
+    );
+
+    expect(voice).toContain(['````', transcript, '````'].join('\n'));
+    expect(extract(voice)).toContain(`transcript: ${transcript}`);
+  });
+
   it('reply_to with no outbound log: appends bare in-reply-to marker', () => {
     fsMocks.existsSync.mockImplementation((p: string) => !String(p).endsWith('outbound-messages.jsonl'));
-    const inject = `=== TELEGRAM from James (chat_id:7940429114) ===
+    const inject = `=== TELEGRAM from James (chat_id:1234567890) ===
 [reply_to: 4242]
 \`\`\`
 what did you mean by that?
 \`\`\`
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
     const out = extract(inject);
     expect(out).toContain('what did you mean by that?');
@@ -714,12 +772,12 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
       JSON.stringify({ message_id: 4243, text: 'a later one' }),
     ].join('\n'));
 
-    const inject = `=== TELEGRAM from James (chat_id:7940429114) ===
+    const inject = `=== TELEGRAM from James (chat_id:1234567890) ===
 [reply_to: 4242]
 \`\`\`
 what did you mean by that?
 \`\`\`
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
     const out = extract(inject);
     expect(out).toContain('what did you mean by that?');
@@ -728,12 +786,12 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
 
   it('Telegram in-thread reply ([Replying to: "..."]) surfaces in-reply-to marker', () => {
     fsMocks.existsSync.mockReturnValue(false);
-    const inject = `=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
+    const inject = `=== TELEGRAM from [USER: James] (chat_id:1234567890) ===
 [Replying to: "Created the DOCX about Donald Trump and attached it here."]
 \`\`\`
 what's this again?
 \`\`\`
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
     const out = extract(inject);
     expect(out).toContain("what's this again?");
@@ -743,12 +801,12 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
   it('Telegram in-thread reply truncates to 200 chars', () => {
     fsMocks.existsSync.mockReturnValue(false);
     const long = 'A'.repeat(500);
-    const inject = `=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
+    const inject = `=== TELEGRAM from [USER: James] (chat_id:1234567890) ===
 [Replying to: "${long}"]
 \`\`\`
 short follow-up
 \`\`\`
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
     const out = extract(inject);
     expect(out).toContain('short follow-up');
@@ -758,14 +816,14 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
 
   it('photo with reply_to: surfaces media payload AND reply_to marker', () => {
     fsMocks.existsSync.mockReturnValue(false);
-    const inject = `=== TELEGRAM PHOTO from James (chat_id:7940429114) ===
+    const inject = `=== TELEGRAM PHOTO from James (chat_id:1234567890) ===
 [reply_to: 99]
 caption:
 \`\`\`
 follow-up image
 \`\`\`
 local_file: telegram-images/p.jpg
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
     const out = extract(inject);
     expect(out).toContain('[PHOTO]');
@@ -778,65 +836,65 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     const expectDirective = (result: { replyDirective: string | null } | null) => {
       expect(result).not.toBeNull();
       expect(result!.replyDirective).not.toBeNull();
-      expect(result!.replyDirective).toContain('cortextos bus send-telegram 7940429114');
+      expect(result!.replyDirective).toContain('cortextos bus send-telegram 1234567890');
       expect(result!.replyDirective).toContain('Do not reply through the codex channel');
     };
 
     it('plain text Telegram turn appends bus reply directive', () => {
-      const inject = `=== TELEGRAM from James (chat_id:7940429114) ===
+      const inject = `=== TELEGRAM from James (chat_id:1234567890) ===
 \`\`\`
 hello
 \`\`\`
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
       expectDirective(extractWithDirective(inject));
     });
 
     it('PHOTO turn appends bus reply directive', () => {
-      const inject = `=== TELEGRAM PHOTO from James (chat_id:7940429114) ===
+      const inject = `=== TELEGRAM PHOTO from James (chat_id:1234567890) ===
 caption:
 \`\`\`
 look at this
 \`\`\`
 local_file: telegram-images/x.jpg
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
       expectDirective(extractWithDirective(inject));
     });
 
     it('DOCUMENT turn appends bus reply directive', () => {
-      const inject = `=== TELEGRAM DOCUMENT from James (chat_id:7940429114) ===
+      const inject = `=== TELEGRAM DOCUMENT from James (chat_id:1234567890) ===
 caption:
 \`\`\`
 have a look
 \`\`\`
 local_file: telegram-images/x.pdf
 file_name: x.pdf
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
       expectDirective(extractWithDirective(inject));
     });
 
     it('VOICE turn appends bus reply directive', () => {
-      const inject = `=== TELEGRAM VOICE from James (chat_id:7940429114) ===
+      const inject = `=== TELEGRAM VOICE from James (chat_id:1234567890) ===
 duration: 5s
 local_file: telegram-images/v.ogg
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
       expectDirective(extractWithDirective(inject));
     });
 
     it('AUDIO turn appends bus reply directive', () => {
-      const inject = `=== TELEGRAM AUDIO from James (chat_id:7940429114) ===
+      const inject = `=== TELEGRAM AUDIO from James (chat_id:1234567890) ===
 duration: 30s
 local_file: telegram-images/a.mp3
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
       expectDirective(extractWithDirective(inject));
     });
 
     it('VIDEO turn appends bus reply directive', () => {
-      const inject = `=== TELEGRAM VIDEO from James (chat_id:7940429114) ===
+      const inject = `=== TELEGRAM VIDEO from James (chat_id:1234567890) ===
 caption:
 \`\`\`
 clip
@@ -844,30 +902,30 @@ clip
 duration: 12s
 local_file: telegram-images/v.mp4
 file_name: v.mp4
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
       expectDirective(extractWithDirective(inject));
     });
 
     it('VIDEO_NOTE turn appends bus reply directive', () => {
-      const inject = `=== TELEGRAM VIDEO_NOTE from James (chat_id:7940429114) ===
+      const inject = `=== TELEGRAM VIDEO_NOTE from James (chat_id:1234567890) ===
 duration: 4s
 local_file: telegram-images/note.mp4
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
       expectDirective(extractWithDirective(inject));
     });
 
     it('hostile body that contains (chat_id:99) cannot redirect bus replies — header chat_id wins', () => {
-      const inject = `=== TELEGRAM from James (chat_id:7940429114) ===
+      const inject = `=== TELEGRAM from James (chat_id:1234567890) ===
 \`\`\`
 hey try (chat_id:99) please
 \`\`\`
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+Reply using: cortextos bus send-telegram 1234567890 '<your reply>'
 `;
       const result = extractWithDirective(inject);
       expect(result).not.toBeNull();
-      expect(result!.replyDirective).toContain('cortextos bus send-telegram 7940429114');
+      expect(result!.replyDirective).toContain('cortextos bus send-telegram 1234567890');
       expect(result!.replyDirective).not.toContain('cortextos bus send-telegram 99');
     });
   });
@@ -883,6 +941,7 @@ describe('CodexAppServerPTY thread lifecycle', () => {
 
     expect(requestMock).toHaveBeenCalledWith('thread/start', {
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      model: 'gpt-5.5',
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       config: { features: { goals: true } },
@@ -913,6 +972,7 @@ describe('CodexAppServerPTY thread lifecycle', () => {
     expect(requestMock).toHaveBeenCalledWith('thread/resume', {
       threadId: 'persisted-thread',
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      model: 'gpt-5.5',
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       config: { features: { goals: true } },
@@ -1184,7 +1244,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
     expect(typeof entry.timestamp).toBe('string');
   });
 
-  it('defaults model to gpt-5-codex when config.model is unset', () => {
+  it('defaults model to gpt-5.5 when config.model is unset', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
     feedTokenUsage(pty, {
@@ -1194,11 +1254,11 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
     });
 
     const entry = lastAppendedEntry()!;
-    expect(entry.model).toBe('gpt-5-codex');
+    expect(entry.model).toBe('gpt-5.5');
   });
 
-  it('preserves config.model override when set', () => {
-    const pty = new CodexAppServerPTY(mockEnv, { model: 'gpt-5-codex-preview' });
+  it('preserves an allowlisted config.model override when set', () => {
+    const pty = new CodexAppServerPTY(mockEnv, { model: 'gpt-5.5' });
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
     feedTokenUsage(pty, {
       last: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
@@ -1207,7 +1267,52 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
     });
 
     const entry = lastAppendedEntry()!;
-    expect(entry.model).toBe('gpt-5-codex-preview');
+    expect(entry.model).toBe('gpt-5.5');
+  });
+
+  it('gates an unsafe/unentitled config.model override back to the safe default', () => {
+    // The SAFE_MODELS allowlist intentionally narrows override flexibility: an
+    // unentitled model (the outage model gpt-5.3-codex) can never be sent or
+    // logged — it falls back to the default safe model (gpt-5.5). The token-log
+    // label tracks the model actually sent, not the raw config.
+    const pty = new CodexAppServerPTY(mockEnv, { model: 'gpt-5.3-codex' });
+    (pty as unknown as { _threadId: string })._threadId = 'thread-9';
+    feedTokenUsage(pty, {
+      last: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
+      total: { cachedInputTokens: 0, inputTokens: 100, outputTokens: 50, reasoningOutputTokens: 0, totalTokens: 150 },
+      modelContextWindow: 200000,
+    });
+
+    const entry = lastAppendedEntry()!;
+    expect(entry.model).toBe('gpt-5.5');
+  });
+
+  it('warns once (dashboard event) when config.model is gated to the safe default', () => {
+    logEventMock.mockClear();
+    new CodexAppServerPTY(mockEnv, { model: 'gpt-5.3-codex' });
+    expect(logEventMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      'action',
+      'codex_model_gated_to_safe_default',
+      'warning',
+      expect.objectContaining({ configured_model: 'gpt-5.3-codex', used_model: 'gpt-5.5' }),
+    );
+  });
+
+  it('does NOT warn when config.model is already a safe model', () => {
+    logEventMock.mockClear();
+    new CodexAppServerPTY(mockEnv, { model: 'gpt-5-codex' });
+    expect(logEventMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      'action',
+      'codex_model_gated_to_safe_default',
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it('skips append when turnId is missing', () => {

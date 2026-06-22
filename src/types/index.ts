@@ -157,10 +157,90 @@ export interface EcosystemConfig {
   community_publish?: EcosystemFeatureConfig;
 }
 
+// Comms-Lint Configuration Types (per-org context.json + per-agent config.json)
+
+/**
+ * A single configurable comms-lint rule expressed in JSON. Because JSON cannot
+ * hold a native RegExp, the pattern is carried as a source string plus optional
+ * flags. The loader (`src/bus/comms-lint-config.ts`) compiles these safely and
+ * fails open — any rule that is malformed (bad id, bad flags, over-length, or an
+ * uncompilable pattern) is silently dropped without affecting the others.
+ */
+export interface CommsLintRuleSpec {
+  /** Stable identifier used for allowlist removal. Must match /^[a-z0-9:_-]+$/. */
+  id: string;
+  /**
+   * Regex source as a string (compiled by the loader). Max length 1000.
+   *
+   * SECURITY: this is operator-authored and compiled with `new RegExp`, then run
+   * against every outbound message on the synchronous send path. Config authors
+   * are trusted; the 1000-char cap bounds memory/pattern size, NOT catastrophic
+   * backtracking. A pathological pattern can cause ReDoS and hang sends, so avoid
+   * nested quantifiers like `(a+)+`. Keep patterns simple.
+   */
+  pattern: string;
+  /** Regex flags; subset of "gimsuy". Defaults to "i" (case-insensitive) to match the hardcoded defaults. */
+  flags?: string;
+  /** Human-readable explanation of why the phrase is blocked. */
+  reason: string;
+  /** Optional rewrite hint surfaced by --suggest dry-run mode. */
+  suggest?: string;
+}
+
+/**
+ * Per-group configuration. The three keys are deliberately distinct operations so
+ * intent is never ambiguous:
+ *   - `replace`: discard ALL hardcoded defaults for this group and use only these rules.
+ *   - `add`: append new rules to the resolved set for this group.
+ *   - `allow`: remove rules (defaults or added) whose id matches exactly (allowlist).
+ * Intra-group resolution order is fixed: replace -> add -> allow.
+ */
+export interface CommsLintGroupConfig {
+  /** Discard defaults for this group, use only these rules. */
+  replace?: CommsLintRuleSpec[];
+  /** Append these rules to the group. */
+  add?: CommsLintRuleSpec[];
+  /** Remove rules by exact id (allowlist). Runs last, so it can strip an added/replaced rule too. */
+  allow?: string[];
+}
+
+/**
+ * The `comms_lint` config block, valid on both OrgContext and AgentConfig.
+ *
+ * Precedence is total and unambiguous: agent config overrides org config overrides
+ * hardcoded defaults. Within each layer, per-group operations apply in the order
+ * replace -> add -> allow. Missing or malformed config fails open to defaults.
+ *
+ * `add_active_context` / `add_next_signal_context` only EXTEND the passive-group
+ * context allowers (OR-ed onto the default regex). There is intentionally no
+ * `replace` for them — to permit a passive phrase, allowlist the specific passive
+ * rule instead of weakening the context allower wholesale.
+ */
+export interface CommsLintConfig {
+  /** Hard-fail base posture patterns (was BANNED_POSTURE_PATTERNS). */
+  banned?: CommsLintGroupConfig;
+  /** Soft posture patterns gated by active/next-signal context (was PASSIVE_POSTURE_PATTERNS). */
+  passive?: CommsLintGroupConfig;
+  /** Telegram-only banned patterns (was TELEGRAM_BANNED_PATTERNS). */
+  telegram?: CommsLintGroupConfig;
+  /** Agent-name gate. `allow:["agent-name:default"]` disables it. */
+  agentName?: CommsLintGroupConfig;
+  /** Extra regex sources OR-ed onto the active-work context allower. */
+  add_active_context?: string[];
+  /** Extra regex sources OR-ed onto the next-signal context allower. */
+  add_next_signal_context?: string[];
+}
+
 export interface AgentConfig {
   startup_delay?: number;
   max_session_seconds?: number;
   max_crashes_per_day?: number;
+  /**
+   * Sliding-window crash-loop detector. When N crashes occur within the window,
+   * the agent auto-pauses (status: 'halted') instead of retrying. Absent = legacy
+   * daily counter only.
+   */
+  crash_window?: { seconds: number; max_crashes?: number };
   model?: string;
   /**
    * Cost tier for model routing: 'haiku' | 'sonnet' | 'opus'.
@@ -248,9 +328,12 @@ export interface AgentConfig {
    * Whether this agent runs a Telegram poller. Defaults to true when absent
    * (preserves existing behaviour). Set to false on specialist agents that
    * should not own a Telegram bot — only the designated orchestrator agent
-   * should poll.
+   * should poll. Requires BOT_TOKEN + CHAT_ID to already be unset or the
+   * poller will be skipped regardless.
    */
   telegram_polling?: boolean;
+  /** Per-agent comms-lint config. Overrides org-level and hardcoded defaults. */
+  comms_lint?: CommsLintConfig;
 }
 
 export interface CronEntry {
@@ -534,6 +617,8 @@ export interface OrgContext {
    * Agents reference this to resolve slack_handles and trust levels.
    */
   team_members?: TeamMember[];
+  /** Org-level comms-lint config. Overrides hardcoded defaults; overridden by per-agent config. */
+  comms_lint?: CommsLintConfig;
 }
 
 // Telegram Types
@@ -874,11 +959,11 @@ export const VALID_TRUST_LEVELS: TrustLevel[] = ['owner', 'manager', 'member'];
  * Stored in org config or agent config under team_members.
  */
 export interface TeamMember {
-  /** Display name (e.g. "Jordan Lee") */
+  /** Display name (e.g. "Jane Smith") */
   name: string;
   /** Job role or title (e.g. "Operations Manager") */
   role: string;
-  /** Slack handle without @ (e.g. "jordan.lee") */
+  /** Slack handle without @ (e.g. "brittany.hunter") */
   slack_handle: string;
   /** Trust level — determines how the agent treats messages from this person */
   trust_level: TrustLevel;

@@ -174,10 +174,7 @@ export function parseIdentityMd(
   for (const section of parsed.sections) {
     const key = IDENTITY_HEADINGS[section.heading.toLowerCase()];
     if (key) {
-      // Strip HTML-comment placeholders (e.g. "<!-- Agent name (set during
-      // onboarding) -->") so an un-onboarded template field resolves to "" rather
-      // than rendering the raw scaffolding comment on the dashboard.
-      fields[key] = section.content.replace(/<!--[\s\S]*?-->/g, '').trim();
+      fields[key] = section.content.trim();
     }
   }
 

@@ -139,12 +139,12 @@ describe('src/bus/hooks — Day-2 per-handler wiring', () => {
         schema_version: '1.0',
         hooks: [makeHook({
           id: 'a',
-          event_pattern: { category: 'action', type: 'pm_meld_completed', metadata: { tech: 'sam' } },
+          event_pattern: { category: 'action', type: 'pm_meld_completed', metadata: { tech: 'carlos' } },
         })],
       };
-      expect(matchHooks(reg, makeEvent({ metadata: { tech: 'sam', meld: 12345 } }), 'collie'))
+      expect(matchHooks(reg, makeEvent({ metadata: { tech: 'carlos', meld: 12345 } }), 'collie'))
         .toHaveLength(1);
-      expect(matchHooks(reg, makeEvent({ metadata: { tech: 'alex' } }), 'collie'))
+      expect(matchHooks(reg, makeEvent({ metadata: { tech: 'silvano' } }), 'collie'))
         .toHaveLength(0);
     });
   });

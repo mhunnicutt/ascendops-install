@@ -156,7 +156,7 @@ When heartbeat fires at the same time as another cron (e.g., approvals):
 ## Degraded Shell Handling
 
 If shell commands fail (exit code 1 on all commands):
-1. Alert David via direct Telegram API using WebFetch
+1. Alert the owner via direct Telegram API using WebFetch
 2. Write a degraded heartbeat memory entry using the Write tool
 3. Do not claim "heartbeat complete" — mark as "heartbeat degraded, shell broken"
 

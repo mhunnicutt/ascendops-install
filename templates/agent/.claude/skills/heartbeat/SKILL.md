@@ -156,7 +156,7 @@ When heartbeat fires at the same time as another cron (e.g., approvals):
 ## Degraded Shell Handling
 
 If shell commands fail (exit code 1 on all commands):
-1. Alert David via direct Telegram API using WebFetch
+1. Alert the owner via direct Telegram API using WebFetch
 2. Write a degraded heartbeat memory entry using the Write tool
 3. Do not claim "heartbeat complete" — mark as "heartbeat degraded, shell broken"
 
@@ -174,7 +174,7 @@ Call this:
 - When starting a new significant task
 - Before going into a long-running operation
 
-**Never claim a status you haven't verified.** If your crons were reset on restart, check CronList before saying "crons running."
+**Never claim a status you haven't verified.** If your crons were reset on restart, check `cortextos bus list-crons $CTX_AGENT_NAME` before saying "crons running."
 
 ---
 
