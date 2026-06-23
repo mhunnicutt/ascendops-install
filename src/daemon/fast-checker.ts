@@ -6,7 +6,6 @@ import { hardRestart } from '../bus/system.js';
 import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery, Event, TeamMember } from '../types/index.js';
 import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
 import { updateApproval } from '../bus/approval.js';
-import { listTasks } from '../bus/task.js';
 import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { SlackAPI, type SlackMessage } from '../slack/api.js';
@@ -791,8 +790,6 @@ export class FastChecker {
     // Watchdog: detect ctx-exhaustion survey + frozen stdout
     this.watchdogCheck();
 
-    // Context restart: fire --continue restart when pending flag is set and no in-progress tasks
-    await this.checkPendingContextRestart();
 
     // NOTE (F8): Gmail watch is intentionally NOT checked here — it runs on
     // its own timer (see start()) because its worst case exceeds the 30s
@@ -905,17 +902,18 @@ export class FastChecker {
         if (pct >= this.ctxThresholdPct && pct <= 100) {
           if (this.ctxThresholdTriggeredAt > 0 &&
               now - this.ctxThresholdTriggeredAt > this.CTX_THRESHOLD_FALLBACK_MS) {
-            // Still at threshold after 15 min with no --continue restart — fallback hard restart
+            // Agent ignored the injection for 15 min — fallback hard restart
             const minAgo = Math.round((now - this.ctxThresholdTriggeredAt) / 60000);
-            this.log(`WATCHDOG: ctx threshold fallback — no restart after ${minAgo}min`);
-            this.triggerHardRestart(`ctx threshold fallback: agent at ${pct}% for ${minAgo}min without restart`);
+            this.log(`WATCHDOG: ctx threshold fallback — agent ignored restart request for ${minAgo}min`);
+            this.triggerHardRestart(`ctx threshold fallback: agent at ${pct}% ignored graceful restart for ${minAgo}min`);
             return;
           } else if (this.ctxThresholdTriggeredAt === 0 ||
               now - this.ctxThresholdTriggeredAt > this.CTX_THRESHOLD_COOLDOWN_MS) {
-            // First trigger (or cooldown expired): set pending restart flag and act on task boundary
+            // First trigger (or cooldown expired): inject graceful restart request
             this.ctxThresholdTriggeredAt = now;
-            this.log(`WATCHDOG: ctx at ${pct}% >= threshold ${this.ctxThresholdPct}% — pending --continue restart at next task boundary`);
-            this.triggerPendingContextRestart(pct);
+            const msg = `Context window at ${pct}%. Please write your session memory and observations now, then run: cortextos bus hard-restart --reason "proactive context reset at ${pct}%" and then run /exit to close this session.`;
+            this.agent.injectMessage(msg);
+            this.log(`WATCHDOG: ctx at ${pct}% >= threshold ${this.ctxThresholdPct}% — injected graceful restart request`);
           }
         }
       }
@@ -938,51 +936,6 @@ export class FastChecker {
       this.log(`WATCHDOG: stdout frozen for ${stalledSec}s while active — hard-restarting`);
       this.triggerHardRestart(`frozen: stdout unchanged ${stalledSec}s while active`);
     }
-  }
-
-  /**
-   * Write .pending-ctx-restart marker and trigger a --continue sessionRefresh()
-   * at the next task boundary. If no tasks are in progress, restart immediately.
-   * Called from Signal 3 in watchdogCheck().
-   */
-  private triggerPendingContextRestart(pct: number): void {
-    const markerPath = join(this.paths.stateDir, '.pending-ctx-restart');
-    try { writeFileSync(markerPath, String(pct), 'utf-8'); } catch { /* non-fatal */ }
-
-    let inProgressCount = 0;
-    try {
-      inProgressCount = listTasks(this.paths, { agent: this.agent.name, status: 'in_progress' }).length;
-    } catch { /* non-fatal — treat as no tasks */ }
-
-    if (inProgressCount === 0) {
-      this.log(`Context at ${pct}%, no tasks in progress — session refresh now`);
-      try { unlinkSync(markerPath); } catch { /* ignore */ }
-      this.ctxThresholdTriggeredAt = 0;
-      this.agent.sessionRefresh().catch(err => this.log(`Context restart failed: ${err}`));
-    } else {
-      this.log(`Context at ${pct}%, ${inProgressCount} task(s) in progress — will restart at next task boundary`);
-    }
-  }
-
-  /**
-   * Called on every poll cycle. If .pending-ctx-restart exists and no tasks are
-   * in progress for this agent, trigger a --continue sessionRefresh().
-   */
-  private async checkPendingContextRestart(): Promise<void> {
-    const markerPath = join(this.paths.stateDir, '.pending-ctx-restart');
-    if (!existsSync(markerPath)) return;
-
-    let inProgressCount = 0;
-    try {
-      inProgressCount = listTasks(this.paths, { agent: this.agent.name, status: 'in_progress' }).length;
-    } catch { return; }
-
-    if (inProgressCount > 0) return;
-
-    this.log('Pending context restart: task boundary reached — session refresh');
-    try { unlinkSync(markerPath); } catch { /* ignore */ }
-    this.ctxThresholdTriggeredAt = 0;
-    this.agent.sessionRefresh().catch(err => this.log(`Context restart failed: ${err}`));
   }
 
   private triggerHardRestart(reason: string, stdoutHighWater?: number): void {
@@ -2313,8 +2266,6 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     this.watchdogCircuitBroken = false;
     this.watchdogRestarts = [];
     this.watchdogCircuitBrokenAt = 0;
-    // Clear any pending context restart marker from the previous session
-    try { unlinkSync(join(this.paths.stateDir, '.pending-ctx-restart')); } catch { /* ignore */ }
     this.log('Watchdog state reset for new session');
   }
 
