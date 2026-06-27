@@ -19,14 +19,14 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const PROJECT = 'atomic-climate-457920-t5';
-const SUBSCRIPTION = 'chat-messages-foothills-sub';
+const PROJECT = 'foothills-chat-bot';
+const SUBSCRIPTION = 'chat-messages-sub';
 const MAX_MESSAGES = 10;
 const DRY_RUN = process.argv.includes('--dry-run');
 
 // Resolve paths relative to this script
 const FRAMEWORK_ROOT = path.resolve(__dirname, '..');
-const KEY_FILE = path.join(FRAMEWORK_ROOT, 'orgs', 'foothills-pm', 'secrets', 'google-drive-key.json');
+const KEY_FILE = path.join(FRAMEWORK_ROOT, 'orgs', 'foothills-pm', 'secrets', 'google-chat-bot-key.json');
 
 function getAccessToken(keyData) {
   return new Promise((resolve, reject) => {
@@ -105,19 +105,23 @@ function pubsubRequest(method, subPath, token, body) {
   });
 }
 
+const MARANDA_CHAT_ID = '8799101497';
+
 function routeToReni(sender, text, spaceId) {
   const msg = `[Google Chat from ${sender} in ${spaceId}]: ${text}`;
   if (DRY_RUN) {
     console.log('[DRY RUN] Would send to reni:', msg);
     return;
   }
-  // Find the bus send-message command
-  const busCmd = path.join(FRAMEWORK_ROOT, 'bus', 'send-message.sh');
-  if (fs.existsSync(busCmd)) {
-    execSync(`bash "${busCmd}" reni normal ${JSON.stringify(msg)}`, { stdio: 'inherit' });
-  } else {
-    const cli = path.join(FRAMEWORK_ROOT, 'dist', 'cli.js');
-    execSync(`node "${cli}" bus send-message reni normal ${JSON.stringify(msg)}`, { stdio: 'inherit' });
+  // On Windows, bash scripts are unreliable — always use the Node.js CLI.
+  const cli = path.join(FRAMEWORK_ROOT, 'dist', 'cli.js');
+  execSync(`node "${cli}" bus send-message reni normal ${JSON.stringify(msg)}`, { stdio: 'inherit' });
+  // Telegram ACK so Maranda knows the message landed.
+  const ack = `Got your Google Chat message and passed it to reni.`;
+  try {
+    execSync(`node "${cli}" bus send-telegram ${MARANDA_CHAT_ID} ${JSON.stringify(ack)}`, { stdio: 'inherit' });
+  } catch (err) {
+    console.warn('Telegram ACK failed:', err.message);
   }
 }
 
