@@ -41,7 +41,7 @@ Complete the following in order. Do not skip steps.
 3. Read org knowledge base: `../../knowledge.md` (shared facts all agents need)
 4. Discover available skills: `ascendops bus list-skills --format text`
 5. Discover active agents: `ascendops bus list-agents` (live roster from enabled-agents.json)
-6. Restore crons from `config.json` — run CronList first (no duplicates). For each entry: if `type: "recurring"` (or no type), call `/loop {interval} {prompt}`; if `type: "once"`, check `fire_at` — recreate via CronCreate if still in the future, or delete from config.json if expired. Do NOT assume crons survived a restart.
+6. Crons are daemon-managed — the daemon reads `crons.json` on start and fires each cron by injecting its prompt into your session, so there is nothing to restore on boot. Do NOT run CronList/CronCreate or `/loop` to recreate crons. View them with `cortextos bus list-crons $CTX_AGENT_NAME`.
 7. Recall recent session facts (cross-session memory from past compactions):
    ```bash
    ascendops bus recall-facts --days 3
@@ -259,7 +259,7 @@ cat >> "memory/$TODAY.md" << MEMEOF
 
 ## Session Start - $(date -u +%H:%M:%S UTC)
 - Status: online
-- Crons active: <list from CronList>
+- Crons active: <list from `cortextos bus list-crons $CTX_AGENT_NAME`>
 - Inbox: <N messages or "empty">
 - Current state: <where things stand — what is in progress, pending, or needs attention>
 - Resuming: <what to do next and why, with enough context to act without re-reading everything>
@@ -400,7 +400,7 @@ Photos include a `local_file:` path. Callbacks include `callback_data:` and `mes
 
 **Waiting for a response:** If you send a Telegram message that asks a question and you need the answer before continuing, you MUST end your current response (stop all tool execution, produce no more output). The user's reply will be injected into your conversation as your next turn by the fast-checker. If you keep executing tools, the reply gets queued and you will never see it. End your turn, and the reply arrives.
 
-**Slash commands from Telegram:** If the message text starts with `/` (e.g. `/loop 4h heartbeat`, `/commit`, `/restart`), treat it as a command to execute — use the Skill tool to invoke it. Parse: `/skillname [args]` → invoke `Skill(skill="skillname", args="[args]")`. Common commands: `/loop` (create cron), `/compact` (compact context), `/restart` (restart agent). If the skill doesn't exist, reply telling the user which skills are available via `ascendops bus list-skills`.
+**Slash commands from Telegram:** If the message text starts with `/` (e.g. `/compact`, `/restart`), treat it as a command to execute — use the Skill tool to invoke it. Parse: `/skillname [args]` → invoke `Skill(skill="skillname", args="[args]")`. Common commands: `/compact` (compact context), `/restart` (restart agent). For persistent crons use `cortextos bus add-cron` — `/loop` is session-only and will NOT survive a restart. If the skill doesn't exist, reply telling the user which skills are available via `ascendops bus list-skills`.
 
 **Formatting:** Use Telegram's regular Markdown (NOT MarkdownV2). Do NOT escape characters like `!`, `.`, `(`, `)`, `-` with backslashes. Only `_`, `*`, `` ` ``, and `[` have special meaning.
 
@@ -420,21 +420,16 @@ Always include `msg_id` as reply_to — this auto-ACKs the original. Un-ACK'd me
 
 ## Crons
 
-All crons — recurring schedules AND one-shot reminders — live in `config.json` under the `crons` array. Write to config.json FIRST, then create the live cron.
+Crons are **daemon-managed**. The daemon reads `${CTX_ROOT}/.cortextOS/state/agents/${CTX_AGENT_NAME}/crons.json` on start and fires each cron by injecting its prompt into your session — no manual restoration needed. You do NOT run CronList/CronCreate or `/loop` to restore crons on boot.
 
-**Recurring:** `{"name": "heartbeat", "type": "recurring", "interval": "4h", "prompt": "..."}`
-**One-shot:** `{"name": "remind-user", "type": "once", "fire_at": "2026-04-02T15:00:00Z", "prompt": "..."}`
+**View:** `cortextos bus list-crons $CTX_AGENT_NAME`
+**Add a recurring cron:** `cortextos bus add-cron $CTX_AGENT_NAME <name> "<interval-or-cron>" "<prompt>"` (`<interval-or-cron>` is an interval like `6h`/`30m`/`1d` or a 5-field cron expr like `0 8 * * *`; `--desc` optional). Daemon-managed; survives restarts. Do NOT use `/loop` for persistent crons — `/loop` is session-only and will not survive a restart.
+**Remove:** `cortextos bus remove-cron $CTX_AGENT_NAME <name>`
+**One-shot reminder** (persists across restarts): `cortextos bus create-reminder <fire-at-ISO-8601-UTC> "<prompt>"` — surfaces the prompt on the agent's NEXT boot once the fire-time has passed (a boot-time reminder, injected into the boot prompt when overdue — not a live alert that fires mid-session). Do NOT use CronCreate.
 
-**On every session start:** Run CronList first (no duplicates). Recreate recurring crons with `/loop`; recreate once crons with CronCreate only if `fire_at` is still in the future — delete expired entries from config.json. Never tell the user a cron is active without confirming it in CronList.
+On every session start, do NOT recreate crons — they auto-load. Just verify with `cortextos bus list-crons $CTX_AGENT_NAME`, and never tell the user a cron is active without confirming it there.
 
-**Add recurring:** Write to config.json, then `/loop {interval} {prompt}`
-**Add one-shot:** Write to config.json with `fire_at`, then CronCreate
-**Remove:** CronDelete, then remove from config.json
-**After one-shot fires:** Delete its entry from config.json
-
-Crons expire after 7 days. They are recreated from config.json on each session start — but only if you actively recreate them. This does not happen automatically.
-
-For full restore protocol, see `.claude/skills/cron-management/SKILL.md`.
+For full CRUD protocol, see `.claude/skills/cron-management/SKILL.md`.
 
 ---
 
