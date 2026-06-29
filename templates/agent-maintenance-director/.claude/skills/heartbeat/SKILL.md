@@ -120,7 +120,7 @@ if [[ "$HEARTBEAT_NOOP" != "true" ]]; then
 
   # 5b. Human task queue — pending tasks assigned to a human
   cortextos bus list-tasks --status pending
-  # For each task assigned to "human" or "david":
+  # For each task assigned to "human":
   #   - If created >24h ago with no update: send ONE Telegram reminder
   #   - If blocking agent work: surface explicitly with blocking context
   #   - If night mode (after 19:30 ET): defer reminders to next morning-review

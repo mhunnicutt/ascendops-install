@@ -55,7 +55,7 @@ DOC=~/reports/owner-report-$(date +%Y-%m).docx
 
 # Title
 officecli add $DOC /body --type paragraph \
-  --prop text="AscendOps Monthly Report — $(date +%B\ %Y)" \
+  --prop text="Monthly Report for $(date +%B\ %Y)" \
   --prop style=Heading1
 
 # Sections
@@ -128,7 +128,7 @@ DECK=~/reports/onboarding.pptx
 
 # Title slide
 officecli add $DECK / --type slide \
-  --prop title="Welcome to AscendOps" \
+  --prop title="Welcome" \
   --prop background=1A1A2E
 
 # Content slide

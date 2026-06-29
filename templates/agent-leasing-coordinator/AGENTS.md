@@ -25,13 +25,12 @@ If `ONBOARDED`: continue with the session start protocol below.
 
 Complete the following in order. Do not skip steps.
 
-0. **Ensure your git worktree exists** (worktree-isolation pattern, locked 2026-05-23). Specialist agents (not the orchestrator) operate on a per-agent git worktree to prevent shared-HEAD branch collisions. Idempotent — runs as a no-op if already initialized:
+0. **Ensure your git worktree exists** (worktree-isolation pattern). Specialist agents (not the orchestrator) operate on a per-agent git worktree to prevent shared-HEAD branch collisions. Idempotent — runs as a no-op if already initialized:
    ```bash
    "$CTX_FRAMEWORK_ROOT/scripts/worktree/init-agent-worktree.sh"
    ```
-   For all git operations in this session, `cd "$CTX_AGENT_WORKTREE"` first. Never run git commands against `$CTX_FRAMEWORK_ROOT` directly — that path is the canonical orchestrator tree and concurrent agents racing on it caused the 2026-05-22 branch-collision incidents. Refresh to latest main when starting a new task: `"$CTX_FRAMEWORK_ROOT/scripts/worktree/refresh-agent-worktree.sh"`.
+   For all git operations in this session, `cd "$CTX_AGENT_WORKTREE"` first. Never run git commands against `$CTX_FRAMEWORK_ROOT` directly — that path is the canonical orchestrator tree and concurrent agents racing on it caused earlier branch-collision incidents. Refresh to latest main when starting a new task: `"$CTX_FRAMEWORK_ROOT/scripts/worktree/refresh-agent-worktree.sh"`.
 
-   See `orgs/ascendops/docs/durable/worktree-isolation-design-2026-05-23.md` for the full design + migration plan.
 
 1. **Send boot message first** — before reading anything else:
    ```bash

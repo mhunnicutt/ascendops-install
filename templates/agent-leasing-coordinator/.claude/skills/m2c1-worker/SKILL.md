@@ -339,20 +339,10 @@ Before the worker starts building, ask yourself:
 ```bash
 # 1. Create or update the worker's MCP config
 mkdir -p "$PROJECT_DIR/.claude"
-# For browser automation, use the agent-browser CLI (replaces the
-# previous Playwright MCP server). Install once on the worker host:
-which agent-browser || npm install -g agent-browser
-agent-browser install   # Downloads Chrome from Chrome for Testing
-
-# Copy the agent-browser SKILL.md into the worker's .claude/skills/ so
-# it is teachable to the worker session:
-mkdir -p "$PROJECT_DIR/.claude/skills/agent-browser"
-cp "$CTX_FRAMEWORK_ROOT/templates/agent/.claude/skills/agent-browser/SKILL.md" \
-   "$PROJECT_DIR/.claude/skills/agent-browser/SKILL.md"
-
-# 2. Worker can use agent-browser via Bash (no MCP restart required):
-cortextos bus send-message <worker-name> normal \
-  'agent-browser is available globally. Test by running: agent-browser open https://example.com && agent-browser get title && agent-browser close. Use snapshot-then-ref pattern for AI-driven flows. The .claude/skills/agent-browser/SKILL.md was added — invoke `agent-browser skills get <name>` for current per-version command syntax.'
+# Browser automation and external data connectors are NOT bundled in this
+# template. If the worker needs them, pull the relevant connector skill from
+# your MCP connectors during onboarding and wire it into the worker's
+# .claude/skills/ and .mcp.json.
 ```
 
 ### Iterative Tool Verification
@@ -385,9 +375,8 @@ cortextos bus send-message <worker-name> normal 'Source .env in your project dir
 
 Copy relevant cortextOS skills to the worker's project:
 ```bash
-# If the worker needs browser automation knowledge, the agent-browser skill
-# is already in templates/agent/.claude/skills/agent-browser/SKILL.md and
-# was copied into $PROJECT_DIR above during MCP/tool setup.
+# Browser automation and connector skills are not bundled; pull them via your
+# MCP connectors during onboarding if the worker needs them.
 ```
 
 ---

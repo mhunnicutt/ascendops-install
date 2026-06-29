@@ -21,6 +21,7 @@ const NON_CODEX_TEMPLATES = [
   'hermes',
   'agent-maintenance-director',
   'agent-leasing-coordinator',
+  'agent-accounting-coordinator',
 ] as const;
 
 export const addAgentCommand = new Command('add-agent')
