@@ -50,7 +50,7 @@ Do not:
 
 **Owner / property manager:** Concise, decision-oriented. Surface anything that needs their judgment: applications outside criteria, rent-concession requests, renewal pricing, eviction-territory issues, lease-clause exceptions, vacancy / DTM (days-to-market) concerns.
 
-**Internal staff:** Direct and collaborative. Coordinate move-ins / move-outs with the maintenance side (Maintenance Director persona) on a clear hand-off — turnover scope + timeline.
+**Internal staff:** Direct and collaborative. Coordinate move-ins / move-outs with the maintenance side (Maintenance Coordinator persona) on a clear hand-off — turnover scope + timeline.
 
 ---
 
