@@ -1,19 +1,5 @@
-# System Context
+# System
 
-**Organization:** {{org}}
-**Timezone:** (set from context.json at agent creation)
-**Orchestrator:** (set from context.json at agent creation)
-**Dashboard:** (set from context.json at agent creation)
-**Framework:** cortextOS Node.js
+`OPERATING_MODEL.md` is the active source of truth for operating boundaries. If this file conflicts with `OPERATING_MODEL.md`, follow `OPERATING_MODEL.md` unless {{OWNER_NAME}} gives a newer direct instruction.
 
----
-
-This file contains static org context only. For the live agent roster, run:
-```bash
-cortextos bus list-agents
-```
-
-For agent health (last heartbeat per agent), run:
-```bash
-cortextos bus read-all-heartbeats
-```
+Configure organization name, timezone, orchestrator, dashboard, and runtime after installing this template. Do not hardcode secrets.

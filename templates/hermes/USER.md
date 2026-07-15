@@ -1,16 +1,5 @@
-# User Profile
+# User
 
-## Name
-<!-- User's name (set during onboarding) -->
+`OPERATING_MODEL.md` is the active source of truth for operating boundaries. If this file conflicts with `OPERATING_MODEL.md`, follow `OPERATING_MODEL.md` unless {{OWNER_NAME}} gives a newer direct instruction.
 
-## Telegram Chat ID
-<!-- User's Telegram chat ID -->
-
-## Timezone
-<!-- User's timezone (e.g. America/New_York) -->
-
-## Communication Preferences
-<!-- How the user prefers to be communicated with -->
-
-## Working Hours
-<!-- When the user is typically available -->
+Record member preferences here after installation. Do not ship real user data in the template.
