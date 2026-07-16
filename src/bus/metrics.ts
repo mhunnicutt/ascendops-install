@@ -101,12 +101,53 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
   const timestamp = new Date().toISOString();
   const today = timestamp.split('T')[0];
 
+  // BUG-028 fix: scan orgs/<org>/agents/ directories as the primary source.
+  // Previously read only config/enabled-agents.json, which doesn't exist in
+  // practice, producing empty agentNames and an empty metrics report.
+  const seen = new Set<string>();
+  const agentNames: string[] = [];
+
+  const cliProjectRoot = process.env.CORTEXTOS_DIR || process.env.CTX_FRAMEWORK_ROOT;
+  const scanRoots: string[] = [];
+  if (cliProjectRoot && existsSync(join(cliProjectRoot, 'orgs'))) {
+    scanRoots.push(cliProjectRoot);
+  }
+  if (scanRoots.length === 0 && !cliProjectRoot) {
+    const cwd = process.cwd();
+    if (existsSync(join(cwd, 'orgs'))) scanRoots.push(cwd);
+  }
+
+  for (const root of scanRoots) {
+    const orgsDir = join(root, 'orgs');
+    if (!existsSync(orgsDir)) continue;
+    let orgDirs: string[];
+    try { orgDirs = readdirSync(orgsDir); } catch { continue; }
+    for (const orgName of orgDirs) {
+      if (org && orgName !== org) continue;
+      const agentsDir = join(orgsDir, orgName, 'agents');
+      if (!existsSync(agentsDir)) continue;
+      let agentDirs: string[];
+      try { agentDirs = readdirSync(agentsDir); } catch { continue; }
+      for (const agentName of agentDirs) {
+        if (!/^[a-z0-9_-]+$/.test(agentName)) continue;
+        if (seen.has(agentName)) continue;
+        seen.add(agentName);
+        agentNames.push(agentName);
+      }
+    }
+  }
+
+  // Fallback: enabled-agents.json for any registered agents not on disk.
   const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
-  let agentNames: string[] = [];
   if (existsSync(enabledFile)) {
     try {
-      agentNames = Object.keys(JSON.parse(readFileSync(enabledFile, 'utf-8')));
-    } catch { /* empty */ }
+      for (const name of Object.keys(JSON.parse(readFileSync(enabledFile, 'utf-8')))) {
+        if (!/^[a-z0-9_-]+$/.test(name)) continue;
+        if (seen.has(name)) continue;
+        seen.add(name);
+        agentNames.push(name);
+      }
+    } catch { /* ignore corrupt file */ }
   }
 
   const agents: Record<string, AgentMetrics> = {};
