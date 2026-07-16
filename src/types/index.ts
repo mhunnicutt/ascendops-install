@@ -312,6 +312,12 @@ export interface AgentConfig {
   /** Context window % at which to trigger graceful restart (Signal 3). Default: 70. */
   ctx_restart_threshold?: number;
   /**
+   * Hard ceiling context % that forces an immediate restart regardless of task state.
+   * Bypasses the task-boundary deferral so context never reaches 100% and triggers
+   * the session-survey watchdog. Default: unset (no hard ceiling). Recommended: 90.
+   */
+  ctx_hard_ceiling?: number;
+  /**
    * Fallback context window cap (tokens) for codex-app-server agents when the
    * server's `thread/tokenUsage/updated` event reports `modelContextWindow=null`.
    * Defaults to 256000 when unset. Only applied to the codex-app-server runtime.

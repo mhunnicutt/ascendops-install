@@ -683,6 +683,7 @@ export class AgentManager {
       gmailWatch: gmailWatchOption,
       slackWatch: slackWatchOption,
       ctxRestartThreshold: config.ctx_restart_threshold,
+      ctxHardCeiling: config.ctx_hard_ceiling,
     });
 
     // Reset watchdog session state on actual transitions back to running.

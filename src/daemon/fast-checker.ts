@@ -160,6 +160,7 @@ export class FastChecker {
   private readonly STDOUT_FROZEN_MS = 30 * 60 * 1000;
   // Context-threshold graceful restart state (Signal 3)
   private ctxThresholdPct: number = 70;
+  private ctxHardCeilingPct: number = 0; // 0 = disabled; when set, forces restart at this % regardless of task state
   private ctxThresholdTriggeredAt: number = 0;
   private readonly CTX_THRESHOLD_COOLDOWN_MS = 10 * 60 * 1000;   // 10 min — no re-inject
   private readonly CTX_THRESHOLD_FALLBACK_MS = 15 * 60 * 1000;  // 15 min — hard-restart if ignored
@@ -308,6 +309,7 @@ export class FastChecker {
         teamMembers?: TeamMember[];
       };
       ctxRestartThreshold?: number;
+      ctxHardCeiling?: number;
     } = {},
   ) {
     this.agent = agent;
@@ -319,6 +321,7 @@ export class FastChecker {
     this.chatId = options.chatId;
     this.allowedUserIds = options.allowedUserIds ?? (options.allowedUserId !== undefined ? [options.allowedUserId] : undefined);
     this.ctxThresholdPct = options.ctxRestartThreshold ?? 70;
+    this.ctxHardCeilingPct = options.ctxHardCeiling ?? 0;
 
     // Initialize persistent dedup
     this.dedupFilePath = join(paths.stateDir, '.message-dedup-hashes');
@@ -993,6 +996,17 @@ export class FastChecker {
       const pctMatch = stripped.match(/[█░\u{1F534}\u{1F7E1}\u{1F7E2}][^\S\n]*(\d{1,3})%[^\S\n]{0,3}context[^\S\n]*used/u);
       if (pctMatch) {
         const pct = parseInt(pctMatch[1], 10);
+
+        // Hard ceiling: force immediate hard restart at ctxHardCeilingPct regardless of
+        // task state. This prevents context from reaching 100% and triggering the
+        // session-survey watchdog (Signal 1 paired-restart pattern). Takes priority over
+        // the graceful-restart path below.
+        if (this.ctxHardCeilingPct > 0 && pct >= this.ctxHardCeilingPct) {
+          this.log(`WATCHDOG: ctx hard ceiling at ${pct}% >= ${this.ctxHardCeilingPct}% — forcing hard restart`);
+          this.triggerHardRestart(`ctx hard ceiling: ${pct}% >= configured ceiling ${this.ctxHardCeilingPct}%`);
+          return;
+        }
+
         if (pct >= this.ctxThresholdPct && pct <= 100) {
           // §5d: A context handoff prompt was already injected this session — skip
           // Signal-3 injection to avoid two competing restart requests in the same
