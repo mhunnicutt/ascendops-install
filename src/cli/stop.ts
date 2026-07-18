@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { IPCClient } from '../daemon/ipc-server.js';
+import { readEnabledAgents, writeEnabledAgents } from './enable-agent.js';
 
 /**
  * BUG-036 fix: write a `.user-stop` marker before the agent's PTY is killed,
@@ -23,6 +24,27 @@ export function writeStopMarker(instanceId: string, agent: string, reason: strin
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, '.user-stop'), reason);
   } catch { /* don't block stop on marker-write failure */ }
+}
+
+/**
+ * Root-cause fix: `.user-stop` (above) is read only by the crash-alert hook
+ * and by heartbeat.ts's end-marker cleanup — nothing in the daemon's startup
+ * path (agent-manager.ts discoverAndStart) ever consults it. The actual gate
+ * that decides whether an agent starts on daemon boot / --continue config
+ * reload is config/enabled-agents.json (`entry.enabled === false` is
+ * skipped). Without this write, `cortextos stop <agent>` kills the current
+ * process but the very next full discovery pass silently re-spawns it,
+ * because nothing told the registry the agent should stay down. Mirrors the
+ * write `disableAgentCommand` already does in enable-agent.ts, but keeps
+ * `stop` and `disable` as separate commands — `stop` only marks the agent
+ * disabled in the registry, it does not deregister or touch other fields.
+ */
+export function markAgentStoppedInRegistry(instanceId: string, agent: string): void {
+  try {
+    const agents = readEnabledAgents(instanceId);
+    agents[agent] = { ...(agents[agent] ?? {}), enabled: false, status: 'stopped' };
+    writeEnabledAgents(instanceId, agents);
+  } catch { /* don't block stop on registry-write failure */ }
 }
 
 export const stopCommand = new Command('stop')
@@ -59,6 +81,7 @@ export const stopCommand = new Command('stop')
     if (agent) {
       console.log(`Stopping agent: ${agent}`);
       writeStopMarker(options.instance, agent, 'stopped via cortextos stop');
+      markAgentStoppedInRegistry(options.instance, agent);
       const response = await ipc.send({ type: 'stop-agent', agent, source: 'cortextos stop' });
       if (response.success) {
         console.log(`  ${response.data}`);
@@ -83,6 +106,7 @@ export const stopCommand = new Command('stop')
     }
     for (const a of agents) {
       writeStopMarker(options.instance, a, 'stopped via cortextos stop --all');
+      markAgentStoppedInRegistry(options.instance, a);
       const response = await ipc.send({ type: 'stop-agent', agent: a, source: 'cortextos stop --all' });
       console.log(`  ${a}: ${response.success ? 'stopped' : response.error}`);
     }

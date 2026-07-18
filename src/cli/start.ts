@@ -1,11 +1,11 @@
 import { Command } from 'commander';
-import { existsSync, readFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir, platform } from 'os';
 import { execSync, spawn, spawnSync } from 'child_process';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { requestKeepAlive } from './_finalize.js';
-import { atomicWriteSync } from '../utils/atomic.js';
+import { readEnabledAgents, writeEnabledAgents } from './enable-agent.js';
 
 const IS_WINDOWS = platform() === 'win32';
 const SAFE_CMD = /^[@a-z0-9._/-]+$/i;
@@ -15,6 +15,41 @@ function commandExists(cmd: string): boolean {
   const which = IS_WINDOWS ? 'where' : 'which';
   const result = spawnSync(which, [cmd], { stdio: 'pipe' });
   return result.status === 0;
+}
+
+/**
+ * Ensures `agent` is enabled:true in the registry, either creating a fresh
+ * entry (preserving org detected from sibling entries) or flipping an
+ * existing disabled entry back on. Returns a short description of what
+ * changed, or null if the registry already reflected enabled:true.
+ *
+ * This is the other half of markAgentStoppedInRegistry (stop.ts): stop
+ * writes enabled:false so discoverAndStart's existing skip-check actually
+ * gates a `cortextos stop`-stopped agent; this is what makes an explicit
+ * `cortextos start <agent>` durable past the next daemon boot /
+ * `--continue` config reload, instead of leaving the registry saying
+ * enabled:false while the IPC call below starts the process live just for
+ * this session.
+ */
+export function ensureAgentEnabledInRegistry(instanceId: string, agent: string): string | null {
+  const enabledAgents = readEnabledAgents(instanceId);
+  const entry = enabledAgents[agent];
+  if (!entry) {
+    const existingOrg = Object.values(enabledAgents as Record<string, any>).find((e: any) => e.org)?.org;
+    enabledAgents[agent] = {
+      enabled: true,
+      status: 'configured',
+      ...(existingOrg ? { org: existingOrg } : {}),
+    };
+    writeEnabledAgents(instanceId, enabledAgents);
+    return `Registered ${agent} in enabled-agents.json`;
+  }
+  if (entry.enabled === false) {
+    enabledAgents[agent] = { ...entry, enabled: true, status: 'configured' };
+    writeEnabledAgents(instanceId, enabledAgents);
+    return `Re-enabled ${agent} in enabled-agents.json`;
+  }
+  return null;
 }
 
 export const startCommand = new Command('start')
@@ -170,30 +205,8 @@ export const startCommand = new Command('start')
 
     // Daemon already running
     if (agent) {
-      // Auto-register in enabled-agents.json if not already present
-      const ctxRoot = join(homedir(), '.cortextos', options.instance);
-      const enabledPath = join(ctxRoot, 'config', 'enabled-agents.json');
-      let enabledAgents: Record<string, any> = {};
-      try {
-        if (existsSync(enabledPath)) {
-          enabledAgents = JSON.parse(readFileSync(enabledPath, 'utf-8'));
-        }
-      } catch { /* ignore */ }
-
-      if (!enabledAgents[agent]) {
-        // Try to detect org from existing entries or project structure
-        const existingOrg = Object.values(enabledAgents as Record<string, any>).find((e: any) => e.org)?.org;
-        enabledAgents[agent] = {
-          enabled: true,
-          status: 'configured',
-          ...(existingOrg ? { org: existingOrg } : {}),
-        };
-        mkdirSync(join(ctxRoot, 'config'), { recursive: true });
-        // Atomic temp-file + rename: a torn write to the fleet registry would
-        // disable every agent on next boot. atomicWriteSync appends the newline.
-        atomicWriteSync(enabledPath, JSON.stringify(enabledAgents, null, 2));
-        console.log(`  Registered ${agent} in enabled-agents.json`);
-      }
+      const registryChange = ensureAgentEnabledInRegistry(options.instance, agent);
+      if (registryChange) console.log(`  ${registryChange}`);
 
       console.log(`Starting agent: ${agent}`);
       const response = await ipc.send({ type: 'start-agent', agent, source: 'cortextos start' });
