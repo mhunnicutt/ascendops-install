@@ -1,10 +1,15 @@
-import { join } from 'path';
+import { basename, join } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { platform } from 'os';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
 import { loadAdapter } from './adapters/base.js';
 import { injectMessage as injectMessageIntoPty } from './inject.js';
+import {
+  ensureBypassPromptSuppressed,
+  ensureFolderTrusted,
+  readUnattendedConsent,
+} from '../utils/claude-preflight.js';
 
 // node-pty types
 interface IPty {
@@ -26,6 +31,13 @@ interface IPtySpawnOptions {
 
 type SpawnFn = (file: string, args: string[], options: IPtySpawnOptions) => IPty;
 
+const ANSI_OSC_RE = /\x1b\][^\x07]*(?:\x07|\x1b\\)/g;
+const ANSI_CSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+
+function stripAnsi(value: string): string {
+  return value.replace(ANSI_OSC_RE, '').replace(ANSI_CSI_RE, '');
+}
+
 /**
  * Manages a single Claude Code PTY session.
  * Replaces the tmux session management in agent-wrapper.sh.
@@ -44,6 +56,9 @@ export class AgentPTY {
   // Enter into the new session (the callbacks only check `this.pty`, which
   // is truthy again after a respawn).
   private trustPromptTimers: ReturnType<typeof setTimeout>[] = [];
+  private promptAnswerSent = false;
+  private promptOutputCursor = 0;
+  private bypassAnswerCount = 0;
 
   constructor(env: CtxEnv, config: AgentConfig, logPath?: string, bootstrapPattern?: string) {
     this.env = env;
@@ -60,6 +75,13 @@ export class AgentPTY {
   async spawn(mode: 'fresh' | 'continue', prompt: string): Promise<void> {
     if (this.pty) {
       throw new Error('PTY already spawned. Kill first.');
+    }
+
+    const explicitSkip = this.config.dangerously_skip_permissions;
+    let effectiveSkip = explicitSkip;
+    if (explicitSkip === undefined && this.isClaudeCodeRuntime()) {
+      // Derived state must never be written into the store that distinguishes explicit from absent.
+      effectiveSkip = readUnattendedConsent(this.env.frameworkRoot);
     }
 
     // Lazy-load node-pty (native addon)
@@ -150,7 +172,10 @@ export class AgentPTY {
     // env is passed natively via node-pty options; no bash export commands required.
     // On Windows, npm global installs create .cmd wrappers, not .exe binaries.
     // node-pty's CreateProcess requires the exact wrapper name to resolve correctly.
-    const claudeArgs = this.buildClaudeArgs(mode, prompt);
+    const effectiveConfig = effectiveSkip === undefined
+      ? this.config
+      : { ...this.config, dangerously_skip_permissions: effectiveSkip };
+    const claudeArgs = this.buildClaudeArgs(mode, prompt, effectiveConfig);
     const claudeCmd = this.getBinaryName();
 
     // Apply vendor adapter's env filter — strips CLAUDE_* env vars before
@@ -159,6 +184,22 @@ export class AgentPTY {
     // no-op pass-through. HermesPTY uses default config.vendor (anthropic),
     // so its env is unchanged.
     const filteredEnv = loadAdapter(this.config.vendor).envFilter(ptyEnv);
+
+    const handlesClaudeTrustPrompts = this.isClaudeCodeRuntime();
+    if (handlesClaudeTrustPrompts) {
+      try {
+        ensureFolderTrusted(cwd);
+      } catch (error) {
+        console.warn(`[claude-preflight] unexpected folder trust failure; spawn will continue: ${String(error)}`);
+      }
+      if (effectiveSkip !== false) {
+        try {
+          ensureBypassPromptSuppressed();
+        } catch (error) {
+          console.warn(`[claude-preflight] unexpected bypass suppression failure; spawn will continue: ${String(error)}`);
+        }
+      }
+    }
 
     this.pty = this.spawnFn!(claudeCmd, claudeArgs, {
       name: 'xterm-256color',
@@ -191,46 +232,68 @@ export class AgentPTY {
       }
     });
 
-    // Claude Code shows interactive prompts on first run that must be auto-accepted.
-    // ANSI note: Claude Code's TUI uses \x1b[1C (cursor-forward) as word separators,
-    // so after ANSI stripping "Bypass Permissions" becomes "BypassPermissions" and
-    // "Yes, I accept" becomes "Yes,Iaccept". Match against the collapsed forms.
-    //
-    // Dialog sequence:
-    // 1. "Trust this folder?" — Enter accepts (option 1 already selected)
-    // 2. "New MCP server found" — Enter accepts (option 1 "Use this MCP server" selected)
-    // 3. "Bypass Permissions mode WARNING" — ↓ then Enter (option 1 is "No,exit"; must reach option 2 "Yes,Iaccept")
-    //
-    // Skipped for runtimes that never show these prompts (Hermes overrides needsTrustPromptAutoAccept).
-    if (this.needsTrustPromptAutoAccept()) {
-      const acceptDialog = () => {
-        if (!this.pty) return;
-        const raw = this.outputBuffer.getRecent();
-        const stripped = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\x1b[()][AB012]/g, '');
-        if (stripped.includes('BypassPermissions') || stripped.includes('Yes,Iaccept') ||
-            stripped.includes('bypass permissions') || stripped.includes('No,exit')) {
-          // Navigate down to "Yes, I accept" then confirm with Enter
-          try { this.pty.write('\x1b[B'); } catch { /* PTY torn down */ }
-          setTimeout(() => { try { if (this.pty) this.pty.write('\r'); } catch { /* ignore */ } }, 300);
-        } else if (stripped.includes('trust') || stripped.includes('MCPserver') ||
-                   stripped.includes('MCP server') || stripped.includes('Entertoconfirm') ||
-                   stripped.includes('Enter to confirm')) {
-          try { this.pty.write('\r'); } catch { /* PTY torn down */ }
-        }
-      };
-      for (const delayMs of [3000, 5000, 8000, 12000, 17000]) {
-        this.trustPromptTimers.push(setTimeout(acceptDialog, delayMs));
+    // Claude Code can show two startup gates:
+    //   1. Folder trust defaults to accept, so Enter confirms it.
+    //   2. Bypass Permissions defaults to "No, exit", so bare Enter kills the process.
+    // Retry through 32s while a gate remains visible, with a hard answer cap.
+    this.promptAnswerSent = false;
+    this.promptOutputCursor = this.outputBuffer.createSafeCursor();
+    this.bypassAnswerCount = 0;
+    if (handlesClaudeTrustPrompts) {
+      for (const delayMs of [5000, 8000, 11000, 14000, 20000, 26000, 32000]) {
+        const timer = setTimeout(() => {
+          if (!this.pty) return;
+          const candidate = this.promptAnswerSent
+            ? this.outputBuffer.getSafeTailSince(this.promptOutputCursor, 4096)
+            : this.outputBuffer.getRecentTail(4096);
+          const tail = stripAnsi(candidate);
+          try {
+            const bypassGateVisible =
+              tail.includes('Yes, I accept') ||
+              tail.includes('running in Bypass Permissions mode');
+            if (bypassGateVisible && effectiveSkip !== false) {
+              if (this.bypassAnswerCount >= 3) return;
+              // Bypass Permissions defaults to exit. Move to accept, then confirm.
+              this.pty.write('\x1b[B\r');
+              this.bypassAnswerCount += 1;
+              this.promptAnswerSent = true;
+              this.promptOutputCursor = this.outputBuffer.createSafeCursor();
+              return;
+            }
+            const folderTrustVisible =
+              tail.includes('Yes, I trust this folder') ||
+              tail.includes('trust the files in this folder');
+            if (folderTrustVisible) {
+              this.pty.write('\r');
+              this.promptAnswerSent = true;
+              this.promptOutputCursor = this.outputBuffer.createSafeCursor();
+            }
+          } catch {
+            // PTY torn down between the alive check and the write. Ignore it.
+          }
+        }, delayMs);
+        this.trustPromptTimers.push(timer);
       }
     }
   }
 
   /**
-   * Whether this runtime shows a "trust this folder?" prompt that the
-   * daemon should auto-accept. Claude Code does; Hermes does not
-   * (HermesPTY overrides this to return false).
+   * Whether the binary this PTY will spawn is Claude Code. Derived from
+   * getBinaryName() -- the same value that decides what actually spawns -- so
+   * runtimes that override the binary (Hermes -> 'hermes', OpenCode ->
+   * 'opencode') and vendor adapters that spawn codex/gemini are excluded
+   * automatically, with no per-subclass opt-out to forget.
+   *
+   * Gates BOTH Claude-only spawn behaviors:
+   *   1. the claude-preflight config writes (~/.claude.json folder trust,
+   *      ~/.claude/settings.json bypass-prompt suppression), and
+   *   2. the trust/bypass prompt auto-accept timers, whose loose substring
+   *      match must never fire a stray keypress into a non-Claude TUI
+   *      (the hazard HermesPTY previously opted out of by override).
    */
-  protected needsTrustPromptAutoAccept(): boolean {
-    return true;
+  protected isClaudeCodeRuntime(): boolean {
+    const binary = basename(this.getBinaryName()).toLowerCase();
+    return binary === 'claude' || binary === 'claude.cmd' || binary === 'claude.exe';
   }
 
   private clearTrustPromptTimers(): void {
@@ -280,9 +343,13 @@ export class AgentPTY {
    * Protected so HermesPTY can override this for its own spawn args.
    * Default delegates to the configured vendor adapter (anthropic by default).
    */
-  protected buildClaudeArgs(mode: 'fresh' | 'continue', prompt: string): string[] {
-    const adapter = loadAdapter(this.config.vendor);
-    return adapter.buildArgs(mode, prompt, { config: this.config, env: this.env });
+  protected buildClaudeArgs(
+    mode: 'fresh' | 'continue',
+    prompt: string,
+    config: AgentConfig = this.config,
+  ): string[] {
+    const adapter = loadAdapter(config.vendor);
+    return adapter.buildArgs(mode, prompt, { config, env: this.env });
   }
 
   /**
