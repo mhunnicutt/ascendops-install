@@ -35,6 +35,14 @@ interface ThreadState {
   updatedAt: string;
 }
 
+interface ModelGateAlertState {
+  status?: 'cleared';
+  configured_model: string;
+  used_model: string;
+  alerted_at: string;
+  cleared_at?: string;
+}
+
 interface SocketPointer {
   socketPath?: string;
   host?: string;
@@ -85,7 +93,7 @@ const TURN_PERMISSION_OVERRIDES = {
 // turn on that model 400s every time (willRetry:false). The codex-app-server
 // protocol takes `model` as a TOP-LEVEL field on thread/start, thread/resume
 // AND turn/start; when it is null/omitted the CLI picks its OWN default, which
-// on codex-cli 0.130.0 is gpt-5.3-codex — the exact failure that took codie
+// on codex-cli 0.130.0 is gpt-5.3-codex — the exact failure that took an agent
 // down 2026-06-04 (every turn 400). We therefore ALWAYS send an explicit,
 // allowlisted model on every thread/turn request (never null). Mirrors the
 // hermes codex adapter's SAFE_MODELS gate for the app-server path.
@@ -135,6 +143,7 @@ const LOCAL_SLASH_COMMANDS = new Set(['goal']);
 export class CodexAppServerPTY {
   private _alive = false;
   private _executing = false;
+  private _activeTurnId: string | null = null;
   private _writeBuffer = '';
   private _turnQueue: unknown[][] = [];
   private _turnCompletion: {
@@ -160,6 +169,7 @@ export class CodexAppServerPTY {
   private _socketCwd: string;
   private _rpcEndpoint: { host: string; port: number } | { socketPath: string } | null = null;
   private _threadStatePath: string;
+  private _modelGateAlertPath: string;
   private _socketPointerPath: string;
   private _threadId: string | null = null;
   private _telegramApi: TelegramAPI | null = null;
@@ -172,6 +182,7 @@ export class CodexAppServerPTY {
     this._cwd = config.working_directory || env.agentDir || process.cwd();
     this._stateDir = join(env.ctxRoot, 'state', env.agentName);
     this._threadStatePath = join(this._stateDir, 'codex-app-server-thread.json');
+    this._modelGateAlertPath = join(this._stateDir, 'codex-model-gate-alert.json');
     this._socketPointerPath = join(this._stateDir, 'codex-app-server-socket.json');
     const socket = this.resolveSocketPath();
     this._socketPath = socket.path;
@@ -215,6 +226,119 @@ export class CodexAppServerPTY {
     }
   }
 
+  private reconcileModelGateAlert(): void {
+    const configured = this._config.model;
+    const gated = !!configured && !SAFE_MODELS.includes(configured);
+    const stateExists = existsSync(this._modelGateAlertPath);
+    let state: ModelGateAlertState | null = null;
+
+    if (stateExists) {
+      try {
+        state = JSON.parse(readFileSync(this._modelGateAlertPath, 'utf-8')) as ModelGateAlertState;
+      } catch {
+        // Fail toward alerting: unreadable dedupe state must not suppress notice.
+        state = null;
+      }
+    }
+
+    if (gated) {
+      if (state?.status !== 'cleared'
+        && state?.configured_model === configured
+        && state.used_model === DEFAULT_SAFE_MODEL) {
+        return;
+      }
+      if (!this._telegramApi || !this._chatId) {
+        this._outputBuffer.push('[codex-app-server] model gate alert deferred: no Telegram handle\n');
+        return;
+      }
+
+      const alertText = `MODEL GATE: agent ${this._env.agentName} config.json requests model '${configured}', which is not on the codex SAFE_MODELS allowlist [${SAFE_MODELS.join(', ')}]. It is actually running '${DEFAULT_SAFE_MODEL}'. If '${configured}' is entitled and intended, add it to SAFE_MODELS in src/pty/codex-app-server-pty.ts, rebuild, and restart the agent. If it is a typo, fix "model" in the agent's config.json. This alert will not repeat for this model across restarts; it re-arms when the gate clears or the configured model changes.`;
+      const alertState: ModelGateAlertState = {
+        configured_model: configured,
+        used_model: DEFAULT_SAFE_MODEL,
+        alerted_at: new Date().toISOString(),
+      };
+      this._telegramApi.sendMessage(this._chatId, alertText, undefined, { parseMode: null })
+        .then(() => {
+          atomicWriteSync(this._modelGateAlertPath, JSON.stringify(alertState, null, 2));
+          try {
+            const paths = resolvePaths(this._env.agentName, this._env.instanceId, this._env.org);
+            logEvent(
+              paths,
+              this._env.agentName,
+              this._env.org,
+              'action',
+              'codex_model_gate_alert_sent',
+              'warning',
+              {
+                configured_model: configured,
+                used_model: DEFAULT_SAFE_MODEL,
+                safe_models: SAFE_MODELS,
+              },
+            );
+          } catch {
+            /* non-fatal: the Telegram alert was delivered */
+          }
+        })
+        .catch((err) => {
+          this._outputBuffer.push(`[codex-app-server] model gate alert send failed: ${err}\n`);
+        });
+      return;
+    }
+
+    if (!stateExists) return;
+
+    try {
+      unlinkSync(this._modelGateAlertPath);
+    } catch (unlinkErr) {
+      const now = new Date().toISOString();
+      const clearedState: ModelGateAlertState = {
+        status: 'cleared',
+        configured_model: state?.configured_model ?? configured ?? '',
+        used_model: state?.used_model ?? DEFAULT_SAFE_MODEL,
+        alerted_at: state?.alerted_at ?? now,
+        cleared_at: now,
+      };
+      try {
+        atomicWriteSync(this._modelGateAlertPath, JSON.stringify(clearedState, null, 2));
+      } catch (writeErr) {
+        this._outputBuffer.push(
+          `[codex-app-server] model gate alert re-arm failed for ${this._modelGateAlertPath}: unlink failed (${unlinkErr}); cleared-tombstone write failed (${writeErr}); remove it manually before re-enabling a gated model.\n`,
+        );
+      }
+      // Do not report a clear when the original gated-state file could not be removed.
+      return;
+    }
+
+    if (this._telegramApi && this._chatId) {
+      const clearedText = configured
+        ? `MODEL GATE CLEARED: agent ${this._env.agentName} is now running its configured model ${configured}.`
+        : `MODEL GATE CLEARED: agent ${this._env.agentName} no longer requests a gated model.`;
+      this._telegramApi.sendMessage(this._chatId, clearedText, undefined, { parseMode: null })
+        .catch((err) => {
+          this._outputBuffer.push(`[codex-app-server] model gate cleared alert send failed: ${err}\n`);
+        });
+    }
+
+    try {
+      const paths = resolvePaths(this._env.agentName, this._env.instanceId, this._env.org);
+      logEvent(
+        paths,
+        this._env.agentName,
+        this._env.org,
+        'action',
+        'codex_model_gate_cleared',
+        'info',
+        {
+          configured_model: configured ?? null,
+          previous_configured_model: state?.configured_model ?? null,
+        },
+      );
+    } catch {
+      /* non-fatal: the state reconciliation already completed */
+    }
+  }
+
   async spawn(mode: 'fresh' | 'continue', prompt: string): Promise<void> {
     if (this._alive) {
       throw new Error('CodexAppServerPTY already spawned. Kill first.');
@@ -230,6 +354,7 @@ export class CodexAppServerPTY {
       await this.initializeRpc();
       await this.startOrResumeThread(mode);
       this._outputBuffer.push(`${BOOTSTRAP_PATTERN} thread=${this._threadId}\n`);
+      this.reconcileModelGateAlert();
       if (prompt.trim()) {
         this.queueTurn([{ type: 'text', text: prompt, text_elements: [] }]);
       }
@@ -261,11 +386,17 @@ export class CodexAppServerPTY {
   }
 
   kill(): void {
-    const pty = this._appServerPty;
-    this.finalizeExit(0, undefined, 'kill');
-    if (pty) {
+    this._alive = false;
+    this._activeTurnId = null;
+    this._turnQueue = [];
+    this.rejectTurnCompletion(new Error('Codex app-server stopped'));
+    if (this._rpc) {
+      this._rpc.close();
+      this._rpc = null;
+    }
+    if (this._appServerPty) {
       try {
-        pty.kill();
+        this._appServerPty.kill();
       } catch {
         // Ignore shutdown errors.
       }
@@ -291,6 +422,13 @@ export class CodexAppServerPTY {
   setTelegramHandle(api: TelegramAPI, chatId: string): void {
     this._telegramApi = api;
     this._chatId = chatId;
+    // Deliberately store-only: reconcileModelGateAlert is invoked ONLY from
+    // spawn() after bootstrap succeeds. Reconciling from a post-start bind was
+    // tried and produced three consecutive defects (missed retry, retry
+    // suppression, dedupe-state corruption during pending bootstrap) on a path
+    // no production caller reaches - the sole caller binds pre-start
+    // (agent-manager.ts:601). If a post-start caller is ever added, see the
+    // PR #48 review thread before reintroducing reconcile here.
   }
 
   private finalizeExit(exitCode: number, signal?: number, reason?: string): void {
@@ -704,7 +842,46 @@ export class CodexAppServerPTY {
     return response.result?.data?.[0]?.id || null;
   }
 
+  /**
+   * Mid-turn parity with the Claude PTY-injection path: while a turn is
+   * executing, try `turn/steer` so the message lands in the active turn at the
+   * next model step instead of waiting for turn/completed. Any steer rejection
+   * (ExpectedTurnMismatch = turn just ended, ActiveTurnNotSteerable =
+   * review/compact, NoActiveTurn, transport error) falls back to the queue, so
+   * no message is ever lost. CODEX_STEER_DISABLED=1 reverts to pure queueing.
+   */
   private queueTurn(input: unknown[]): void {
+    if (this._executing && this._activeTurnId && process.env.CODEX_STEER_DISABLED !== '1') {
+      this.steerActiveTurn(input).catch((err) => {
+        this._outputBuffer.push(`[codex-app-server] steer path failed: ${err}\n`);
+      });
+      return;
+    }
+    this.enqueueTurn(input);
+  }
+
+  private async steerActiveTurn(input: unknown[]): Promise<void> {
+    const expectedTurnId = this._activeTurnId;
+    if (!this._threadId || !expectedTurnId) {
+      this.enqueueTurn(input);
+      return;
+    }
+    try {
+      await this.request('turn/steer', {
+        threadId: this._threadId,
+        expectedTurnId,
+        input,
+      });
+      this._outputBuffer.push(`[codex-app-server] steered active turn ${expectedTurnId}\n`);
+    } catch (err) {
+      // Do not retry steer here: the rejection may be a non-steerable turn
+      // (review/compact). Queueing guarantees delivery right after it ends.
+      this._outputBuffer.push(`[codex-app-server] steer rejected, queueing: ${err}\n`);
+      this.enqueueTurn(input);
+    }
+  }
+
+  private enqueueTurn(input: unknown[]): void {
     this._turnQueue.push(input);
     if (!this._executing) {
       this.drainQueue().catch((err) => {
@@ -829,10 +1006,14 @@ export class CodexAppServerPTY {
         }
         break;
       case 'turn/started':
+        if (isRecord(params.turn) && typeof params.turn.id === 'string') {
+          this._activeTurnId = params.turn.id;
+        }
         this.maybeFireTyping();
         this._outputBuffer.push('[codex-app-server] turn started\n');
         break;
       case 'turn/completed':
+        this._activeTurnId = null;
         this.writeIdleFlag();
         this._outputBuffer.push('[codex-app-server] turn completed\n');
         this.resolveTurnCompletion();
@@ -862,6 +1043,7 @@ export class CodexAppServerPTY {
         this._outputBuffer.push('[goal] cleared\n');
         break;
       case 'error':
+        this._activeTurnId = null;
         this._outputBuffer.push(`[codex-app-server] error: ${JSON.stringify(params)}\n`);
         this.rejectTurnCompletion(new Error(JSON.stringify(params)));
         break;

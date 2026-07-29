@@ -1,13 +1,8 @@
 {
-  "focus": "Accounting coordination — review AR/rent posting, prepare the delinquency feed, draft AP batches and owner statements, reconcile the ledger, and keep every money-movement decision human-gated",
+  "focus": "Supports rent posting, payables, owner statements, trust reconciliation, deposits, and accounting review queues.",
   "goals": [
-    "Review AR / rent posting and keep the delinquency feed current",
-    "Turn approved invoice packets into clean, backed AP draft batches",
-    "Reconcile on cadence and stop + flag on every break",
-    "Draft owner statements and draws a human can approve at a glance",
-    "Track every security-deposit statutory deadline so none lapses"
-  ],
-  "bottleneck": "",
-  "updated_at": "",
-  "updated_by": ""
+    "Keep work visible",
+    "Follow OPERATING_MODEL.md",
+    "Produce verified outputs"
+  ]
 }

@@ -222,6 +222,25 @@ describe('TelegramPoller — offset-after-handler', () => {
       expect(persisted).toBe('0');
     }
   });
+
+  it('does not convert an intentional stop during an in-flight Conflict into a restartable conflict exit', async () => {
+    let rejectPoll: ((err: Error) => void) | undefined;
+    const api = {
+      getUpdates: vi.fn(() => new Promise((_resolve, reject) => {
+        rejectPoll = reject;
+      })),
+    } as unknown as TelegramAPI;
+    const poller = new TelegramPoller(api, stateDir);
+
+    const running = poller.start();
+    await vi.waitFor(() => expect(api.getUpdates).toHaveBeenCalled());
+
+    poller.stop();
+    rejectPoll?.(new Error('Telegram API error: Conflict: terminated by other getUpdates request'));
+
+    await expect(running).resolves.toBeUndefined();
+    expect(poller.lastExitReason).toBe('stopped-externally');
+  });
 });
 
 describe('TelegramPoller — offset-file collision guard', () => {
@@ -286,5 +305,31 @@ describe('TelegramPoller — offset-file collision guard', () => {
       b.stop();
       rmSync(other, { recursive: true, force: true });
     }
+  });
+
+  it('stop() aborts the in-flight getUpdates request', async () => {
+    let seenSignal: AbortSignal | undefined;
+    const api = {
+      getUpdates: vi.fn((_offset: number, _timeout: number, signal?: AbortSignal) => {
+        seenSignal = signal;
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => {
+            reject(new Error('Telegram API request aborted: getUpdates'));
+          });
+        });
+      }),
+    } as unknown as TelegramAPI;
+
+    const poller = new TelegramPoller(api, stateDir);
+    const pollPromise = poller.pollOnce();
+    await Promise.resolve();
+
+    expect(seenSignal).toBeDefined();
+    expect(seenSignal!.aborted).toBe(false);
+
+    poller.stop();
+
+    expect(seenSignal!.aborted).toBe(true);
+    await expect(pollPromise).rejects.toThrow(/aborted/);
   });
 });

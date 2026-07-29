@@ -112,7 +112,7 @@ Agent secrets: `orgs/{org}/agents/{agent}/.env`
 | `ack-reminder <id>` | Acknowledge a fired reminder |
 | `prune-reminders [--days N]` | Clean up old acked reminders |
 
-### OAuth Token Rotation — full docs: `.claude/skills/oauth-rotation/SKILL.md`
+### OAuth Token Rotation
 | Command | What it does |
 |---|---|
 | `check-usage-api [--force]` | Fetch 5h/7d utilization (3-min cache) |
@@ -139,6 +139,12 @@ Agent secrets: `orgs/{org}/agents/{agent}/.env`
 ---
 
 ## Tools Available in This Session
+
+### af (AppFolio CLI)
+- Binary: `af` — plain-HTTP AppFolio reads (occupancies, leases, applications, units, properties, tenants, reports) plus two dry-run-default leasing writes (send-application, group)
+- Health check: `af probe`
+- Command surface and dry-run posture: `af --help` and `af <command> --help`
+- Session recapture: follow `ONBOARDING.md` Step 3a and the capture instructions shipped with the platform operator's reviewed `cli-anything-appfolio` source
 
 ### Playwright (Browser Automation)
 - `playwright` Python binary, Chromium installed (headless)

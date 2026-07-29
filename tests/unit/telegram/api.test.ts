@@ -37,6 +37,27 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('TelegramAPI SSN redaction', () => {
+  it('scrubs SSNs from reply_markup button labels (AskUserQuestion inline keyboard)', async () => {
+    queue({ status: 200, body: { ok: true, result: { message_id: 1 } } });
+    const api = new TelegramAPI('111:AAA');
+    await api.sendMessage('222', 'Pick one', {
+      inline_keyboard: [[{ text: 'Tenant 123-45-6789', callback_data: 'opt1' }]],
+    });
+    const markup = JSON.stringify(callLog[0].body.reply_markup);
+    expect(markup).toContain('[REDACTED-SSN]');
+    expect(markup).not.toContain('123-45-6789');
+  });
+
+  it('scrubs SSNs from the message text', async () => {
+    queue({ status: 200, body: { ok: true, result: { message_id: 1 } } });
+    const api = new TelegramAPI('111:AAA');
+    await api.sendMessage('222', 'tenant SSN 123-45-6789 on file');
+    expect(String(callLog[0].body.text)).toContain('[REDACTED-SSN]');
+    expect(String(callLog[0].body.text)).not.toContain('123-45-6789');
+  });
+});
+
 describe('TelegramAPI.validateCredentials', () => {
   it('happy path: valid token + reachable user chat returns ok=true', async () => {
     queue({ status: 200, body: { ok: true, result: { id: 111, username: 'my_test_bot' } } });
@@ -339,6 +360,82 @@ describe('TelegramAPI fetch timeout', () => {
     const api = new TelegramAPI('123:TEST');
     await expect(api.getUpdates(0, 1)).rejects.toThrow(/timed out after 15s/);
   }, 20000);
+
+  it('distinguishes a caller abort from a network timeout', async () => {
+    globalThis.fetch = vi.fn(
+      (_input: any, init?: any) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            const err = new Error('aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        }),
+    ) as any;
+
+    const api = new TelegramAPI('123:TEST');
+    const controller = new AbortController();
+    const request = api.getUpdates(0, 1, controller.signal);
+    controller.abort();
+
+    await expect(request).rejects.toThrow(/request aborted: getUpdates/);
+  });
+
+  it('supports caller abort when AbortSignal.any is unavailable', async () => {
+    globalThis.fetch = vi.fn(
+      (_input: any, init?: any) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            const err = new Error('aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        }),
+    ) as any;
+
+    const originalAny = AbortSignal.any;
+    try {
+      (AbortSignal as typeof AbortSignal & { any?: typeof AbortSignal.any }).any = undefined;
+      const api = new TelegramAPI('123:TEST');
+      const controller = new AbortController();
+      const request = api.getUpdates(0, 1, controller.signal);
+      controller.abort();
+
+      await expect(request).rejects.toThrow(/request aborted: getUpdates/);
+    } finally {
+      AbortSignal.any = originalAny;
+    }
+  });
+
+  it('supports timeout abort when AbortSignal.any is unavailable', async () => {
+    globalThis.fetch = vi.fn(
+      (_input: any, init?: any) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            const err = new Error('aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        }),
+    ) as any;
+
+    const originalAny = AbortSignal.any;
+    const originalTimeout = AbortSignal.timeout;
+    const timeoutController = new AbortController();
+    try {
+      (AbortSignal as typeof AbortSignal & { any?: typeof AbortSignal.any }).any = undefined;
+      AbortSignal.timeout = vi.fn(() => timeoutController.signal);
+      const api = new TelegramAPI('123:TEST');
+      const callerController = new AbortController();
+      const request = api.getUpdates(0, 1, callerController.signal);
+      timeoutController.abort();
+
+      await expect(request).rejects.toThrow(/timed out after 15s: getUpdates/);
+    } finally {
+      AbortSignal.any = originalAny;
+      AbortSignal.timeout = originalTimeout;
+    }
+  });
 
   it('succeeds on normal fetch response', async () => {
     globalThis.fetch = vi.fn(async () =>

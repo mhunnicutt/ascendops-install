@@ -116,6 +116,25 @@ beforeEach(() => {
   fsMocks.statSync.mockReset();
 });
 
+describe('AgentProcess - daemon injection timestamp', () => {
+  it('updates only after a successful PTY injection', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    expect(ap.getLastInjectedAt()).toBe(0);
+    expect(ap.injectMessageDetailed('before start').ok).toBe(false);
+    expect(ap.getLastInjectedAt()).toBe(0);
+
+    await ap.start();
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-16T18:00:00.000Z'));
+      expect(ap.injectMessageDetailed('open the turn')).toEqual({ ok: true });
+      expect(ap.getLastInjectedAt()).toBe(Date.now());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
   it('stop() awaits the PTY exit handler before resolving', async () => {
     const ap = new AgentProcess('alice', mockEnv, {});
@@ -278,6 +297,96 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     const markerWriteOrder = fsMocks.writeFileSync.mock.invocationCallOrder[writeIdx];
     expect(markerWriteOrder).toBeLessThan(stopSpy.mock.invocationCallOrder[0]);
   });
+
+  it('sessionRefresh() retries a failed start and records the failure in restarts.log', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    vi.spyOn(ap, 'stop').mockResolvedValue();
+    const startSpy = vi.spyOn(ap, 'start')
+      .mockRejectedValueOnce(new Error('spawn failed'))
+      .mockResolvedValueOnce();
+    fsMocks.appendFileSync.mockReset();
+
+    vi.useFakeTimers();
+    try {
+      const refresh = ap.sessionRefresh();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await refresh;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(startSpy).toHaveBeenCalledTimes(2);
+    const retryLog = fsMocks.appendFileSync.mock.calls.find(
+      ([path]) => String(path).endsWith('/logs/alice/restarts.log'),
+    );
+    expect(retryLog).toBeDefined();
+    expect(String(retryLog?.[1])).toMatch(/SESSION_REFRESH_RETRY: attempt=1 backoff_s=1 error="spawn failed"/);
+  });
+
+  it('concurrent stop() callers await the same shutdown instead of returning early', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    let firstResolved = false;
+    let secondResolved = false;
+    const first = ap.stop().then(() => { firstResolved = true; });
+    const second = ap.stop().then(() => { secondResolved = true; });
+
+    await Promise.resolve();
+    expect(firstResolved).toBe(false);
+    expect(secondResolved).toBe(false);
+
+    capturedOnExit!(0, 0);
+    await Promise.all([first, second]);
+    expect(firstResolved).toBe(true);
+    expect(secondResolved).toBe(true);
+    expect(mockPty.kill).toHaveBeenCalledTimes(1);
+  }, 10_000);
+
+  it('concurrent start() callers share one PTY spawn', async () => {
+    let releaseSpawn!: () => void;
+    mockPty.spawn.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    }));
+
+    const ap = new AgentProcess('alice', mockEnv, {});
+    const first = ap.start();
+    const second = ap.start();
+
+    await Promise.resolve();
+    expect(mockPty.spawn).toHaveBeenCalledTimes(1);
+
+    releaseSpawn();
+    await Promise.all([first, second]);
+    expect(ap.getStatus().status).toBe('running');
+  });
+
+  it('sessionRefresh() escalates exhausted retries to a fresh hard restart', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    vi.spyOn(ap, 'stop').mockResolvedValue();
+    vi.spyOn(ap, 'start').mockRejectedValue(new Error('persistent spawn failure'));
+    const hardRestartSpy = vi.spyOn(ap, 'hardRestartSelf').mockResolvedValue();
+    fsMocks.appendFileSync.mockReset();
+
+    vi.useFakeTimers();
+    try {
+      const refresh = ap.sessionRefresh();
+      await vi.advanceTimersByTimeAsync(6_000);
+      await refresh;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(hardRestartSpy).toHaveBeenCalledOnce();
+    expect(hardRestartSpy).toHaveBeenCalledWith(expect.stringContaining('session refresh failed after 3 attempts'));
+    const lines = fsMocks.appendFileSync.mock.calls.map(([, line]) => String(line));
+    expect(lines.filter((line) => line.includes('SESSION_REFRESH_RETRY'))).toHaveLength(3);
+    expect(lines.some((line) => line.includes('SESSION_REFRESH_ESCALATION'))).toBe(true);
+  });
 });
 
 describe('AgentProcess - crashCount NaN-guard (bug-hunt #8)', () => {
@@ -390,8 +499,9 @@ describe('AgentProcess - crashCount NaN-guard (bug-hunt #8)', () => {
 });
 
 describe('AgentProcess onboarding fallback', () => {
-  it('keeps the fresh-start back-online instruction for a lone start', () => {
+  it('keeps the fresh-start back-online instruction for a lone Telegram-enabled start', () => {
     const ap = new AgentProcess('alice', mockEnv, {});
+    ap.setTelegramHandle({ sendChatAction: vi.fn(), sendMessage: vi.fn().mockResolvedValue(undefined) } as any, '12345');
     const prompt = (ap as any).buildStartupPrompt(null) as string;
 
     expect(prompt).toContain('Send a Telegram message to the user saying you are back online.');
@@ -626,5 +736,96 @@ describe('AgentProcess — CrashLoopPauser (instar-inspired sliding window)', ()
     }
     // Should be 'crashed' (recovering), NOT 'halted', because daily max is 5
     expect(ap.getStatus().status).not.toBe('halted');
+  });
+});
+
+describe('AgentProcess - onboarding marker (do not auto-write .onboarded on heartbeat)', () => {
+  // Regression: buildStartupPrompt used to auto-write the .onboarded marker
+  // whenever a heartbeat.json existed, on the assumption the agent had
+  // onboarded and just forgot the marker. That silently suppressed FIRST BOOT
+  // for agents that were manually scaffolded (heartbeat present) but never
+  // actually ran onboarding. The marker must be explicit: a heartbeat alone
+  // must NOT mark an agent onboarded. This is general daemon behavior (it was
+  // surfaced via a manually-scaffolded opencode agent, but applies to any
+  // runtime).
+  it('does not auto-mark a heartbeat-only agent as onboarded (still routes to FIRST BOOT)', async () => {
+    fsMocks.existsSync.mockImplementation((path: string) => {
+      if (path.endsWith('/.force-fresh')) return false;
+      if (path.endsWith('/.onboarded')) return false;
+      if (path.endsWith('/heartbeat.json')) return true;
+      if (path.endsWith('/ONBOARDING.md')) return true;
+      return false;
+    });
+
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    const prompt = mockPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('FIRST BOOT');
+    expect(prompt).toContain('read ONBOARDING.md and complete the onboarding protocol');
+    // The buggy auto-write must be gone: no .onboarded written from heartbeat presence.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('/.onboarded'),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('respects an existing .onboarded marker (suppresses FIRST BOOT)', async () => {
+    fsMocks.existsSync.mockImplementation((path: string) => {
+      if (path.endsWith('/.force-fresh')) return false;
+      if (path.endsWith('/.onboarded')) return true;
+      if (path.endsWith('/heartbeat.json')) return true;
+      if (path.endsWith('/ONBOARDING.md')) return true;
+      return false;
+    });
+
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    const prompt = mockPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).not.toContain('FIRST BOOT');
+    expect(prompt).not.toContain('complete the onboarding protocol');
+  });
+
+  // OURS-PATH (reconcile follow-on): our 2d129a68 bootstrap-content arm survives.
+  // No .onboarded marker, no heartbeat — but IDENTITY.md + MEMORY.md have real
+  // non-template content. The daemon MUST retro-write .onboarded and suppress
+  // FIRST BOOT (heartbeat alone is no longer sufficient post-#667 reconcile).
+  it('retro-writes .onboarded and suppresses FIRST BOOT when IDENTITY/MEMORY have non-template content (our bootstrap-content arm survives reconcile)', async () => {
+    fsMocks.existsSync.mockImplementation((path: string) => {
+      if (path.endsWith('/.force-fresh')) return false;
+      if (path.endsWith('/.onboarded')) return false;
+      if (path.endsWith('/heartbeat.json')) return false;     // no heartbeat — arm must not be needed
+      if (path.endsWith('/ONBOARDING.md')) return true;       // present so FIRST BOOT would fire without retro-write
+      if (path.endsWith('/IDENTITY.md')) return true;
+      if (path.endsWith('/MEMORY.md')) return true;
+      return false;
+    });
+
+    fsMocks.readFileSync.mockImplementation((p: unknown) => {
+      const path = String(p);
+      if (path.endsWith('/IDENTITY.md')) {
+        return `# Agent Identity\n\n## Name\nalice\n\n## Role\nResearch specialist for the team.\n`;
+      }
+      if (path.endsWith('/MEMORY.md')) {
+        return '# Long-Term Memory\n\nThis agent has been configured with substantial operating context and learned patterns that go well beyond the shipped template placeholder text.\n';
+      }
+      return '';
+    });
+
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    // Bootstrap-content arm retro-writes the marker.
+    expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('/.onboarded'),
+      '',
+      'utf-8',
+    );
+    // With .onboarded now set, FIRST BOOT must be suppressed.
+    const prompt = mockPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).not.toContain('FIRST BOOT');
+    expect(prompt).not.toContain('complete the onboarding protocol');
   });
 });

@@ -187,7 +187,7 @@ describe('outbound comms lint', () => {
     // SHA regex must require at least one hex letter; plain numeric IDs
     // (phone numbers, dollar amounts, ticket numbers) must NOT block.
     await busCommand.parseAsync(
-      ['send-telegram', '12345', 'Call back at 4233161234 about ticket 9876543'],
+      ['send-telegram', '12345', 'Call back at 423555' + '0144 about ticket 9876543'],
       { from: 'user' },
     );
     expect(telegramSendSpy).toHaveBeenCalledTimes(1);
@@ -200,9 +200,12 @@ describe('outbound comms lint', () => {
     expect(telegramSendSpy).not.toHaveBeenCalled();
   });
 
-  it('blocks send-telegram by default when message contains an agent name', async () => {
+  it('blocks send-telegram by default (fail-safe floor: caller own name, no roster) ', async () => {
+    // Config-drive: agent-name lint is roster-driven, NOT a hardcoded set. The FAIL-SAFE
+    // floor is the calling agent's OWN identity (CTX_AGENT_NAME='test-agent') — so even
+    // with zero org roster configured, an agent can never leak its own name.
     await expect(
-      busCommand.parseAsync(['send-telegram', '12345', 'Codie just shipped the work'], { from: 'user' })
+      busCommand.parseAsync(['send-telegram', '12345', 'test-agent just shipped the work'], { from: 'user' })
     ).rejects.toThrow();
     expect(telegramSendSpy).not.toHaveBeenCalled();
   });

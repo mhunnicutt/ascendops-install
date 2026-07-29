@@ -243,6 +243,17 @@ export interface AgentConfig {
   crash_window?: { seconds: number; max_crashes?: number };
   model?: string;
   /**
+   * Whether to launch Claude Code with `--dangerously-skip-permissions`.
+   * Defaults to true (back-compat: agents run unattended). Set to false to keep
+   * Claude Code's permission system engaged so the PermissionRequest hook
+   * (hook-permission-telegram) gates tool use instead of everything auto-running.
+   * An explicitly present config field wins over the install-level consent
+   * record in both directions. The record supplies this value only when the
+   * field is omitted.
+   * Only applies to the claude-code runtime (Hermes never passes the flag).
+   */
+  dangerously_skip_permissions?: boolean;
+  /**
    * Cost tier for model routing: 'haiku' | 'sonnet' | 'opus'.
    * Ignored when `model` is set (explicit model takes precedence).
    * Resolved to a concrete model ID via model_tiers (or DEFAULT_MODEL_TIERS).
@@ -303,6 +314,14 @@ export interface AgentConfig {
   ctx_handoff_threshold?: number;
   /** Context window % at which to trigger graceful restart (Signal 3). Default: 70. */
   ctx_restart_threshold?: number;
+  /** Open-turn inactivity threshold in minutes. Default: 30. */
+  turn_watchdog_threshold_minutes?: number;
+  /**
+   * Hard ceiling context % that forces an immediate restart regardless of task state.
+   * Bypasses the task-boundary deferral so context never reaches 100% and triggers
+   * the session-survey watchdog. Default: unset (no hard ceiling). Recommended: 90.
+   */
+  ctx_hard_ceiling?: number;
   /**
    * Fallback context window cap (tokens) for codex-app-server agents when the
    * server's `thread/tokenUsage/updated` event reports `modelContextWindow=null`.
@@ -310,12 +329,25 @@ export interface AgentConfig {
    */
   codex_context_cap?: number;
   /**
+   * Fallback context window cap (tokens) for opencode agents when the OpenCode
+   * model cache does not expose a context limit. Only applies to runtime:
+   * 'opencode'.
+   */
+  opencode_context_cap?: number;
+  /**
    * Agent runtime. Defaults to 'claude-code' when absent.
    * 'hermes' selects the HermesPTY spawn path (Python persistent REPL,
    * NousResearch/hermes-agent) with Hermes-specific bootstrap, session
    * continuity, and exit handling.
+   * 'opencode' selects the OpencodePTY spawn path, a native PTY terminal
+   * runtime for opencode.ai's OpenCode CLI.
    */
-  runtime?: 'claude-code' | 'hermes' | 'codex-app-server';
+  runtime?: 'claude-code' | 'hermes' | 'codex-app-server' | 'opencode';
+  /**
+   * Optional OpenCode agent name to pass as `opencode --agent <name>`.
+   * Only applies to runtime: 'opencode'.
+   */
+  opencode_agent?: string;
   /**
    * Vendor adapter for the underlying CLI binary. Defaults to 'anthropic'
    * when absent (which spawns the `claude` CLI). MVP supports anthropic only;
@@ -569,9 +601,13 @@ export interface CronDefinition {
  * It is append-only; log rotation prunes to the last 1 000 lines.
  *
  * Status semantics:
- *   "fired"   — the fire attempt succeeded on this attempt.
- *   "retried" — this attempt failed but more retries remain (see `error`).
- *   "failed"  — final failure after exhausting all retries (see `error`).
+ *   "fired"              — paste/write injection succeeded; this does NOT prove the REPL executed it.
+ *   "confirmed"          — transcript contains the salted user turn, proving the REPL consumed it.
+ *   "noop_unconfirmed"   — detector did not find the salted turn after one verification window.
+ *   "noop_reinjected"    — detector still did not find it after two windows and performed one safe re-inject.
+ *   "noop_persistent"    — detector did not find the re-injected turn after both verification windows.
+ *   "retried"            — this attempt failed but more retries remain (see `error`).
+ *   "failed"             — final failure after exhausting all retries (see `error`).
  */
 export interface CronExecutionLogEntry {
   /** ISO 8601 UTC timestamp of the fire attempt. */
@@ -579,7 +615,7 @@ export interface CronExecutionLogEntry {
   /** Cron name (matches CronDefinition.name). */
   cron: string;
   /** Outcome of this attempt. */
-  status: 'fired' | 'retried' | 'failed';
+  status: 'fired' | 'confirmed' | 'noop_unconfirmed' | 'noop_reinjected' | 'noop_persistent' | 'retried' | 'failed';
   /** Attempt index (1-based). */
   attempt: number;
   /** Wall-clock duration of the fire attempt in milliseconds. */
@@ -844,7 +880,7 @@ export interface CronSummaryRow {
    * Outcome of the most recent execution log entry.
    * Null when the cron has never fired.
    */
-  lastStatus: 'fired' | 'retried' | 'failed' | null;
+  lastStatus: CronExecutionLogEntry['status'] | null;
   /**
    * ISO 8601 timestamp of the next scheduled fire.
    * Computed from the cron's schedule + last_fired_at (or now).
@@ -959,11 +995,11 @@ export const VALID_TRUST_LEVELS: TrustLevel[] = ['owner', 'manager', 'member'];
  * Stored in org config or agent config under team_members.
  */
 export interface TeamMember {
-  /** Display name (e.g. "Jane Smith") */
+  /** Display name (e.g. "Morgan Reed") */
   name: string;
   /** Job role or title (e.g. "Operations Manager") */
   role: string;
-  /** Slack handle without @ (e.g. "brittany.hunter") */
+  /** Slack handle without @ (e.g. "morgan.reed") */
   slack_handle: string;
   /** Trust level — determines how the agent treats messages from this person */
   trust_level: TrustLevel;

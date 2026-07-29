@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -8,7 +8,7 @@ vi.mock('child_process', () => ({
   execFile: (...args: unknown[]) => execFileMock(...args),
 }));
 
-import { readMaxCrashesPerDay, notifyAgents, safeCrashCount, classifyFromMarkers } from '../../../src/hooks/hook-crash-alert';
+import { readMaxCrashesPerDay, notifyAgents, safeCrashCount, classifyFromMarkers, readCrashCountToday } from '../../../src/hooks/hook-crash-alert';
 import { clearEndMarkers } from '../../../src/bus/heartbeat';
 
 describe('safeCrashCount NaN-guard (bug-hunt #8)', () => {
@@ -102,8 +102,16 @@ describe('readMaxCrashesPerDay', () => {
 });
 
 describe('notifyAgents', () => {
+  const originalFrameworkRoot = process.env.CTX_FRAMEWORK_ROOT;
+
   beforeEach(() => {
     execFileMock.mockReset();
+    delete process.env.CTX_FRAMEWORK_ROOT;
+  });
+
+  afterEach(() => {
+    if (originalFrameworkRoot === undefined) delete process.env.CTX_FRAMEWORK_ROOT;
+    else process.env.CTX_FRAMEWORK_ROOT = originalFrameworkRoot;
   });
 
   it('sends one bus send-message per recipient', () => {
@@ -132,6 +140,29 @@ describe('notifyAgents', () => {
     const [cmd, args] = execFileMock.mock.calls[0];
     expect(cmd).toBe('cortextos');
     expect(args.slice(0, 4)).toEqual(['bus', 'send-message', 'chief', 'high']);
+  });
+
+  it('uses the framework CLI through the current Node executable when CTX_FRAMEWORK_ROOT is set', () => {
+    process.env.CTX_FRAMEWORK_ROOT = '/opt/cortextos';
+    notifyAgents({
+      agentName: 'dev',
+      endType: 'crash',
+      reason: 'r',
+      lastTask: 't',
+      crashCount: 1,
+      restartAttempted: true,
+      recipients: ['chief'],
+    });
+
+    const [cmd, args] = execFileMock.mock.calls[0];
+    expect(cmd).toBe(process.execPath);
+    expect(args.slice(0, 5)).toEqual([
+      join('/opt/cortextos', 'dist', 'cli.js'),
+      'bus',
+      'send-message',
+      'chief',
+      'high',
+    ]);
   });
 
   it('body includes all required fields', () => {
@@ -257,6 +288,55 @@ describe('classifyFromMarkers', () => {
     writeFileSync(join(tmp, '.restart-planned'), 'planned', 'utf-8');
     writeFileSync(join(tmp, '.user-stop'), 'stopped', 'utf-8');
     expect(classifyFromMarkers(tmp, MARKERS).endType).toBe('planned-restart');
+  });
+});
+
+describe('readCrashCountToday (read-only — daemon owns the counter)', () => {
+  let tmp: string;
+  const today = new Date().toISOString().split('T')[0];
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'crashalert-count-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("reads today's count", () => {
+    const f = join(tmp, '.crash_count_today');
+    writeFileSync(f, `${today}:3`, 'utf-8');
+    expect(readCrashCountToday(f, today)).toBe(3);
+  });
+
+  it('returns 0 for a stale (different-day) count', () => {
+    const f = join(tmp, '.crash_count_today');
+    writeFileSync(f, '2020-01-01:9', 'utf-8');
+    expect(readCrashCountToday(f, today)).toBe(0);
+  });
+
+  it('returns 0 when the file is missing', () => {
+    expect(readCrashCountToday(join(tmp, '.crash_count_today'), today)).toBe(0);
+  });
+
+  it('coerces a torn/garbage count to a safe 0', () => {
+    const f = join(tmp, '.crash_count_today');
+    writeFileSync(f, `${today}:NaN`, 'utf-8');
+    expect(readCrashCountToday(f, today)).toBe(0);
+  });
+
+  it('NEVER writes — does not create a missing file (Item-1 no-op proof)', () => {
+    const f = join(tmp, '.crash_count_today');
+    readCrashCountToday(f, today);
+    expect(existsSync(f)).toBe(false);
+  });
+
+  it('NEVER mutates — leaves an existing count byte-for-byte unchanged', () => {
+    const f = join(tmp, '.crash_count_today');
+    writeFileSync(f, `${today}:2`, 'utf-8');
+    readCrashCountToday(f, today);
+    readCrashCountToday(f, today); // repeated reads must not increment
+    expect(readFileSync(f, 'utf-8')).toBe(`${today}:2`);
   });
 });
 

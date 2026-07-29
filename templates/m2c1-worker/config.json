@@ -1,0 +1,5 @@
+{
+  "name": "{{AGENT_NAME}}",
+  "runtime": "{{RUNTIME}}",
+  "model": "{{MODEL}}"
+}

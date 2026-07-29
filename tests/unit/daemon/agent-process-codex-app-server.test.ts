@@ -63,6 +63,7 @@ const fsMocks = {
   writeFileSync: vi.fn(),
   appendFileSync: vi.fn(),
   statSync: vi.fn(),
+  unlinkSync: vi.fn(),
 };
 
 vi.mock('fs', async () => {
@@ -70,6 +71,7 @@ vi.mock('fs', async () => {
   return {
     ...actual,
     mkdirSync: vi.fn(),
+    get unlinkSync() { return fsMocks.unlinkSync; },
     get existsSync() { return fsMocks.existsSync; },
     get readFileSync() { return fsMocks.readFileSync; },
     get writeFileSync() { return fsMocks.writeFileSync; },
@@ -108,6 +110,7 @@ beforeEach(() => {
   fsMocks.writeFileSync.mockReset();
   fsMocks.appendFileSync.mockReset();
   fsMocks.statSync.mockReset();
+  fsMocks.unlinkSync.mockClear();
 });
 
 describe('AgentProcess codex-app-server runtime', () => {
@@ -145,6 +148,47 @@ describe('AgentProcess codex-app-server runtime', () => {
     expect(log).toHaveBeenCalledWith('Telegram back-online notification sent for codex-app-agent');
   });
 
+  it('sends planned-restart msg1 but skips generic back-online Telegram on handoff restart', async () => {
+    // Simulate handoff doc marker present at .handoff-doc-path so
+    // consumeHandoffBlock() returns a non-empty fragment, marking the spawn
+    // as a handoff restart that should suppress the daemon-direct ping.
+    // existsSync must return true for BOTH the marker file and the doc path
+    // it points at — consumeHandoffBlock checks both.
+    const handoffDocPath = '/tmp/handoff-doc.md';
+    fsMocks.existsSync.mockImplementation((path: string) =>
+      typeof path === 'string'
+      && (path.endsWith('.handoff-doc-path') || path === handoffDocPath),
+    );
+    fsMocks.readFileSync.mockReturnValue(handoffDocPath);
+
+    const ap = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const api = { sendChatAction: vi.fn().mockResolvedValue(undefined), sendMessage };
+
+    ap.setTelegramHandle(api as any, '12345');
+    await ap.start();
+
+    const prompt = mockCodexAppServerPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('CONTEXT HANDOFF');
+    expect(sendMessage).toHaveBeenCalledWith('12345', '🔄 codex-app-agent restarted (planned): no reason given');
+    expect(sendMessage).not.toHaveBeenCalledWith('12345', 'Agent codex-app-agent is back online');
+    expect(sendMessage).not.toHaveBeenCalledWith('12345', 'Agent codex-app-agent is back online (context handoff)');
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not send daemon-direct back-online Telegram for claude-code runtime (issue #392)', async () => {
+    // claude-code already executes the inline "Send a Telegram message..."
+    // bootstrap instruction itself, so the daemon must not double up.
+    const ap = new AgentProcess('claude-agent', mockEnv, { runtime: 'claude-code' });
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const api = { sendChatAction: vi.fn().mockResolvedValue(undefined), sendMessage };
+
+    ap.setTelegramHandle(api as any, '12345');
+    await ap.start();
+
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
   it('suppresses the direct codex-app-server back-online notification during a fleet start batch', async () => {
     const ap = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
     const api = {
@@ -174,4 +218,45 @@ describe('AgentProcess codex-app-server runtime', () => {
     await stopPromise;
     expect(mockCodexAppServerPty.kill).toHaveBeenCalled();
   }, 10000);
+
+  it('ignores stale Claude JSONL when picking continue vs fresh', async () => {
+    const codexThreadPath = '/tmp/test-ctx/state/codex-app-agent/codex-app-server-thread.json';
+
+    // A stale Claude JSONL is irrelevant for this runtime. With no Codex thread
+    // state, the launch must be fresh.
+    fsMocks.existsSync.mockImplementation((path: string) => {
+      if (path.endsWith('.force-fresh')) return false;
+      if (path === codexThreadPath) return false;
+      return path.endsWith('.jsonl');
+    });
+    const fresh = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
+    await fresh.start();
+    expect(mockCodexAppServerPty.spawn).toHaveBeenLastCalledWith('fresh', expect.any(String));
+
+    // The runtime's own thread-state file is the only continue signal.
+    mockCodexAppServerPty.spawn.mockClear();
+    fsMocks.existsSync.mockImplementation((path: string) => {
+      if (path.endsWith('.force-fresh')) return false;
+      return path === codexThreadPath;
+    });
+    const continued = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
+    await continued.start();
+    expect(mockCodexAppServerPty.spawn).toHaveBeenLastCalledWith('continue', expect.any(String));
+  });
+
+  it('force-fresh wins over codex thread state and the marker is consumed', async () => {
+    const codexThreadPath = '/tmp/test-ctx/state/codex-app-agent/codex-app-server-thread.json';
+
+    // Both signals present: .force-fresh must win (fresh spawn), and the
+    // marker must be consumed in the launch decision — pins the
+    // force-fresh-BEFORE-runtime-checks ordering in shouldContinue().
+    fsMocks.existsSync.mockImplementation((path: string) => {
+      if (path.endsWith('.force-fresh')) return true;
+      return path === codexThreadPath;
+    });
+    const forced = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
+    await forced.start();
+    expect(mockCodexAppServerPty.spawn).toHaveBeenLastCalledWith('fresh', expect.any(String));
+    expect(fsMocks.unlinkSync).toHaveBeenCalledWith(expect.stringMatching(/\.force-fresh$/));
+  });
 });

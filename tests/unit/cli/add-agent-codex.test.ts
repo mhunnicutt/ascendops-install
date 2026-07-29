@@ -223,6 +223,98 @@ describe('PR-02: add-agent --runtime codex-app-server', () => {
     const cfg = JSON.parse(readFileSync(join(agentDir, 'config.json'), 'utf-8'));
     expect(cfg.runtime).toBe('claude-code');
   });
+
+  it.each([false, true])('stamps genuine unattended consent %s into a generated config', async (consent) => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    writeFileSync(
+      join(tempRoot, '.claude-consent.json'),
+      JSON.stringify({ unattended_bypass: consent, decided_at: new Date().toISOString(), source: 'interactive-installer' }),
+    );
+
+    const name = consent ? 'claude-consented' : 'claude-declined';
+    await addAgentCommand.parseAsync([
+      'node', 'cli', name,
+      '--org', 'testorg', '--instance', 'pr02-test',
+    ]);
+
+    const cfg = JSON.parse(readFileSync(join(tempRoot, 'orgs', 'testorg', 'agents', name, 'config.json'), 'utf-8'));
+    expect(cfg.dangerously_skip_permissions).toBe(consent);
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['defaulted', JSON.stringify({ unattended_bypass: false, decided_at: new Date().toISOString(), source: 'non-interactive-default' })],
+    ['corrupt', '{broken'],
+  ])('does not persist %s consent as an explicit generated field', async (_label, record) => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    if (record !== undefined) writeFileSync(join(tempRoot, '.claude-consent.json'), record);
+
+    const name = `claude-${_label}`;
+    await addAgentCommand.parseAsync([
+      'node', 'cli', name,
+      '--org', 'testorg', '--instance', 'pr02-test',
+    ]);
+
+    const cfg = JSON.parse(readFileSync(join(tempRoot, 'orgs', 'testorg', 'agents', name, 'config.json'), 'utf-8'));
+    expect(cfg).not.toHaveProperty('dangerously_skip_permissions');
+  });
+
+  it('scaffolds opencode from the standard agent bootstrap without codex artifacts', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await addAgentCommand.parseAsync([
+      'node', 'cli', 'opencode-test', '--runtime', 'opencode',
+      '--org', 'testorg', '--instance', 'pr02-test',
+    ]);
+
+    const agentDir = join(tempRoot, 'orgs', 'testorg', 'agents', 'opencode-test');
+    expect(existsSync(agentDir)).toBe(true);
+
+    const cfg = JSON.parse(readFileSync(join(agentDir, 'config.json'), 'utf-8'));
+    expect(cfg.runtime).toBe('opencode');
+    expect(cfg.agent_name).toBe('opencode-test');
+
+    // OpenCodePTY does not discover Codex plugin skills or host-wide ~/.codex
+    // skill symlinks. It starts in the agent working directory and uses the
+    // local bootstrap files plus its own .opencode config dir at runtime.
+    expect(existsSync(join(agentDir, 'plugins', 'cortextos-agent-skills'))).toBe(false);
+    expect(existsSync(join(tempHome, '.codex', 'skills'))).toBe(false);
+
+    // Default OpenCode agents intentionally keep the standard agent bootstrap:
+    // AGENTS.md/CLAUDE.md/persona docs are present, with Claude skill docs left
+    // as ordinary local files rather than runtime-discovered OpenCode skills.
+    expect(existsSync(join(agentDir, 'AGENTS.md'))).toBe(true);
+    expect(existsSync(join(agentDir, 'CLAUDE.md'))).toBe(true);
+    expect(existsSync(join(agentDir, '.claude', 'skills', 'onboarding', 'SKILL.md'))).toBe(true);
+  });
+
+  it('honors explicit templates for opencode and does not apply the codex-only guard', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await addAgentCommand.parseAsync([
+      'node', 'cli', 'opencode-orch',
+      '--template', 'orchestrator',
+      '--runtime', 'opencode',
+      '--org', 'testorg', '--instance', 'pr02-test',
+    ]);
+
+    const agentDir = join(tempRoot, 'orgs', 'testorg', 'agents', 'opencode-orch');
+    const cfg = JSON.parse(readFileSync(join(agentDir, 'config.json'), 'utf-8'));
+    expect(cfg.runtime).toBe('opencode');
+    expect(cfg.agent_name).toBe('opencode-orch');
+    expect(existsSync(join(agentDir, 'plugins', 'cortextos-agent-skills'))).toBe(false);
+    expect(existsSync(join(agentDir, '.claude', 'skills', 'morning-review', 'SKILL.md'))).toBe(true);
+
+    const codexSkillsDir = join(tempHome, '.codex', 'skills');
+    if (existsSync(codexSkillsDir)) {
+      const stray = readdirSync(codexSkillsDir).filter(n => n.startsWith('opencode-orch__'));
+      expect(stray.length).toBe(0);
+    }
+  });
 });
 
 /**

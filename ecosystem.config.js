@@ -4,19 +4,24 @@
 // Note: env vars use process.env.X || 'default' so PM2 picks up the value
 // from the calling shell at startup time. This means `CTX_INSTANCE_ID=foo
 // pm2 restart cortextos-daemon` switches instances without regenerating.
+const path = require('path');
+const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT || __dirname;
+const instanceId = process.env.CTX_INSTANCE_ID || 'default';
+const ctxRoot = process.env.CTX_ROOT || path.join(process.env.HOME || frameworkRoot, '.cortextos', instanceId);
+
 module.exports = {
   apps: [
     {
       name: 'cortextos-daemon',
-      script: "C:\\Users\\mhunnicutt_foothills\\ascendops-install\\dist\\daemon.js",
+      script: path.join(frameworkRoot, 'dist', 'daemon.js'),
       args: '--instance ' + (process.env.CTX_INSTANCE_ID || "default"),
-      cwd: "C:\\Users\\mhunnicutt_foothills\\ascendops-install",
+      cwd: frameworkRoot,
       env: {
         CTX_INSTANCE_ID: process.env.CTX_INSTANCE_ID || "default",
-        CTX_ROOT: process.env.CTX_ROOT || "C:\\Users\\mhunnicutt_foothills\\.cortextos\\default",
-        CTX_FRAMEWORK_ROOT: "C:\\Users\\mhunnicutt_foothills\\ascendops-install",
-        CTX_PROJECT_ROOT: "C:\\Users\\mhunnicutt_foothills\\ascendops-install",
-        CTX_ORG: process.env.CTX_ORG || "foothills-pm",
+        CTX_ROOT: ctxRoot,
+        CTX_FRAMEWORK_ROOT: frameworkRoot,
+        CTX_PROJECT_ROOT: process.env.CTX_PROJECT_ROOT || frameworkRoot,
+        CTX_ORG: process.env.CTX_ORG || "ascendops",
       },
       max_restarts: 50,
       restart_delay: 15000,
@@ -29,9 +34,9 @@ module.exports = {
     },
     {
       name: 'cortextos-dashboard',
-      script: "C:\\Users\\mhunnicutt_foothills\\ascendops-install\\dashboard\\node_modules\\next\\dist\\bin\\next",
-      args: "dev",
-      cwd: "C:\\Users\\mhunnicutt_foothills\\ascendops-install\\dashboard",
+      script: 'npm',
+      args: 'run dev',
+      cwd: path.join(frameworkRoot, 'dashboard'),
       env: {
         PORT: process.env.PORT || '3000',
       },

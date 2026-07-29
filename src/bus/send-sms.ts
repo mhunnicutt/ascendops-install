@@ -2,6 +2,7 @@ import { homedir } from 'os';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { Approval, BusPaths } from '../types/index.js';
+import { redactSSN } from '../utils/ssn-redaction.js';
 
 const TELNYX_CREDS = join(homedir(), '.claude', 'credentials', 'telnyx.json');
 
@@ -37,7 +38,7 @@ function loadTelnyxCreds(): TelnyxCreds {
   const fromNumber = raw.from_number?.trim();
   if (!fromNumber) {
     throw new Error(
-      `.from_number missing in ${TELNYX_CREDS} — add your Telnyx-provisioned E.164 number (e.g. "from_number": "+15551234567") to the same file that holds api_key`,
+      `.from_number missing in ${TELNYX_CREDS} — add your Telnyx-provisioned E.164 number (e.g. "from_number": "+12025550143") to the same file that holds api_key`,
     );
   }
   return { apiKey, fromNumber };
@@ -74,6 +75,9 @@ export async function sendSms(
   text: string,
   opts: { sendReal?: boolean; approvedBy?: string } = {},
 ): Promise<SendSmsResult> {
+  // Scrub at the egress primitive: never SHARE an SSN over SMS, and never
+  // surface it in the dry-run preview either. Covers every caller of sendSms.
+  text = redactSSN(text);
   const { apiKey, fromNumber } = loadTelnyxCreds();
   const payload = { from: fromNumber, to, text };
 

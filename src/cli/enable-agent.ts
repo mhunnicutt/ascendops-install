@@ -113,7 +113,7 @@ export function writeDisableMarker(instanceId: string, agent: string, reason: st
   } catch { /* don't block disable on marker-write failure */ }
 }
 
-function writeEnabledAgents(instanceId: string, agents: Record<string, any>): void {
+export function writeEnabledAgents(instanceId: string, agents: Record<string, any>): void {
   const path = getEnabledAgentsPath(instanceId);
   const dir = join(homedir(), '.cortextos', instanceId, 'config');
   mkdirSync(dir, { recursive: true });

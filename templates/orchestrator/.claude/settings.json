@@ -12,7 +12,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "cortextos bus hook-context-status",
+    "command": "node \"$CTX_FRAMEWORK_ROOT/dist/cli.js\" bus hook-context-status",
     "refreshInterval": 5,
     "timeout": 2
   },
@@ -23,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos bus hook-planmode-telegram",
+            "command": "node \"$CTX_FRAMEWORK_ROOT/dist/cli.js\" bus hook-planmode-telegram",
             "timeout": 1860
           }
         ]
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos bus hook-permission-telegram",
+            "command": "node \"$CTX_FRAMEWORK_ROOT/dist/cli.js\" bus hook-permission-telegram",
             "timeout": 1860
           }
         ]
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos bus hook-loop-detector",
+            "command": "node \"$CTX_FRAMEWORK_ROOT/dist/cli.js\" bus hook-loop-detector",
             "timeout": 5
           }
         ]
@@ -53,7 +53,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos bus hook-ask-telegram",
+            "command": "node \"$CTX_FRAMEWORK_ROOT/dist/cli.js\" bus hook-ask-telegram",
             "timeout": 10
           }
         ]
@@ -64,7 +64,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos bus hook-session-restore",
+            "command": "node \"$CTX_FRAMEWORK_ROOT/dist/cli.js\" bus hook-session-restore",
             "timeout": 5
           }
         ]
@@ -75,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos crash-alert",
+            "command": "node \"$CTX_FRAMEWORK_ROOT/dist/cli.js\" crash-alert",
             "timeout": 10
           }
         ]
@@ -86,7 +86,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos bus hook-compact-telegram",
+            "command": "node \"$CTX_FRAMEWORK_ROOT/dist/cli.js\" bus hook-compact-telegram",
             "timeout": 10
           }
         ]
