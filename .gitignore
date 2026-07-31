@@ -76,6 +76,7 @@ AGENTS.md
 dashboard/screenshots/
 dashboard/test-*.py
 graphify-out/
+venv-graphify/
 
 # Weekly tool-update generated logs
 logs/weekly-tool-update/*.md
