@@ -115,9 +115,12 @@ function routeToReni(sender, text, spaceId) {
   }
   // On Windows, bash scripts are unreliable — always use the Node.js CLI.
   const cli = path.join(FRAMEWORK_ROOT, 'dist', 'cli.js');
-  execSync(`node "${cli}" bus send-message reni normal ${JSON.stringify(msg)}`, { stdio: 'inherit' });
-  // Telegram ACK so Maranda knows the message landed.
-  const ack = `Got your Google Chat message and passed it to reni.`;
+  // --skip-lint: this is a verbatim quote of an external Google Chat message, not
+  // agent-authored text. Comms-lint's banned-jargon check was matching phrases inside
+  // the quoted sender text and silently dropping the route (found 2026-08-05).
+  execSync(`node "${cli}" bus send-message reni normal ${JSON.stringify(msg)} --skip-lint`, { stdio: 'inherit' });
+  // Telegram ACK so Maranda knows the message landed. No agent name (comms-lint rule).
+  const ack = `Got your Google Chat message -- routing it for follow-up.`;
   try {
     execSync(`node "${cli}" bus send-telegram ${MARANDA_CHAT_ID} ${JSON.stringify(ack)}`, { stdio: 'inherit' });
   } catch (err) {
@@ -190,7 +193,16 @@ async function main() {
         routeToReni(sender, text, spaceId);
       } catch (err) {
         console.error('Failed to route to reni:', err.message);
-        // Still ACK to avoid infinite redelivery of unroutable messages
+        // A routing failure otherwise vanishes silently (message is still ACK'd below
+        // to avoid infinite redelivery) -- surface it so it doesn't require manual
+        // discovery like the 2026-08-05 Ashley message did.
+        try {
+          const cli = path.join(FRAMEWORK_ROOT, 'dist', 'cli.js');
+          const alert = `Chat listener failed to route a Google Chat message from ${sender}: ${err.message}`;
+          execSync(`node "${cli}" bus send-message master normal ${JSON.stringify(alert)} --skip-lint`, { stdio: 'inherit' });
+        } catch (escalateErr) {
+          console.error('Failed to escalate routing failure to master:', escalateErr.message);
+        }
       }
     } else if (eventType === 'ADDED_TO_SPACE') {
       const spaceName = (event.space && event.space.displayName) || 'unknown';
