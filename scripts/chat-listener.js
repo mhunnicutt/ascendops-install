@@ -2,13 +2,14 @@
 /**
  * chat-listener.js — Google Chat Pub/Sub message listener
  *
- * Pulls messages from the Google Chat Pub/Sub subscription, routes them to
- * reni's cortextos inbox, then ACKs. Designed to run on a short cron interval.
+ * Pulls messages from the Google Chat Pub/Sub subscription, routes them by
+ * space to the owning agent's cortextos inbox, then ACKs. Designed to run on
+ * a short cron interval.
  *
  * Usage: node scripts/chat-listener.js [--dry-run]
  *
  * Reads from: orgs/foothills-pm/secrets/google-drive-key.json
- * Routes to: reni inbox via `cortextos bus send-message`
+ * Routes to: SPACE_ROUTES[spaceId] inbox via `cortextos bus send-message`
  */
 
 'use strict';
@@ -107,10 +108,25 @@ function pubsubRequest(method, subPath, token, body) {
 
 const MARANDA_CHAT_ID = '8799101497';
 
-function routeToReni(sender, text, spaceId) {
+// Maps a Chat space to the agent whose inbox should receive its messages.
+// The bot must be an installed member of a space before any event for it
+// will ever reach Pub/Sub -- being missing from this map is not the only way
+// routing can fail (see the 2026-08-05 Manny-space gap: the bot wasn't a
+// space member at all, so no event was ever generated to route).
+const SPACE_ROUTES = {
+  'spaces/AAQAPnv0b9A': 'reni',        // Foothills space (Ashley renewals, etc.)
+  'spaces/AAQAfGbaplo': 'maintenance', // Manny space
+};
+const DEFAULT_ROUTE = 'reni';
+
+function routeMessage(sender, text, spaceId) {
+  const targetAgent = SPACE_ROUTES[spaceId] || DEFAULT_ROUTE;
+  if (!SPACE_ROUTES[spaceId]) {
+    console.warn(`No route configured for ${spaceId}, defaulting to ${DEFAULT_ROUTE}`);
+  }
   const msg = `[Google Chat from ${sender} in ${spaceId}]: ${text}`;
   if (DRY_RUN) {
-    console.log('[DRY RUN] Would send to reni:', msg);
+    console.log(`[DRY RUN] Would send to ${targetAgent}:`, msg);
     return;
   }
   // On Windows, bash scripts are unreliable — always use the Node.js CLI.
@@ -118,7 +134,7 @@ function routeToReni(sender, text, spaceId) {
   // --skip-lint: this is a verbatim quote of an external Google Chat message, not
   // agent-authored text. Comms-lint's banned-jargon check was matching phrases inside
   // the quoted sender text and silently dropping the route (found 2026-08-05).
-  execSync(`node "${cli}" bus send-message reni normal ${JSON.stringify(msg)} --skip-lint`, { stdio: 'inherit' });
+  execSync(`node "${cli}" bus send-message ${targetAgent} normal ${JSON.stringify(msg)} --skip-lint`, { stdio: 'inherit' });
   // Telegram ACK so Maranda knows the message landed. No agent name (comms-lint rule).
   const ack = `Got your Google Chat message -- routing it for follow-up.`;
   try {
@@ -190,15 +206,15 @@ async function main() {
 
       console.log(`MESSAGE from ${sender}: ${text.substring(0, 80)}`);
       try {
-        routeToReni(sender, text, spaceId);
+        routeMessage(sender, text, spaceId);
       } catch (err) {
-        console.error('Failed to route to reni:', err.message);
+        console.error('Failed to route message:', err.message);
         // A routing failure otherwise vanishes silently (message is still ACK'd below
         // to avoid infinite redelivery) -- surface it so it doesn't require manual
         // discovery like the 2026-08-05 Ashley message did.
         try {
           const cli = path.join(FRAMEWORK_ROOT, 'dist', 'cli.js');
-          const alert = `Chat listener failed to route a Google Chat message from ${sender}: ${err.message}`;
+          const alert = `Chat listener failed to route a Google Chat message from ${sender} in ${spaceId}: ${err.message}`;
           execSync(`node "${cli}" bus send-message master normal ${JSON.stringify(alert)} --skip-lint`, { stdio: 'inherit' });
         } catch (escalateErr) {
           console.error('Failed to escalate routing failure to master:', escalateErr.message);
