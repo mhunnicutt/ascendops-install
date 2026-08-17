@@ -37,12 +37,13 @@ create index if not exists kb_documents_collection_idx
 
 -- Cosine similarity search, scoped to one collection, with an optional
 -- metadata `type` filter (mirrors mmrag.py's --type image/video/text/pdf/audio
--- filter). Exposed automatically as POST /rest/v1/rpc/kb_match_documents.
+-- filter -- audio maps to two stored types, hence an array rather than a
+-- single value). Exposed automatically as POST /rest/v1/rpc/kb_match_documents.
 create or replace function kb_match_documents(
   p_collection text,
   p_query_embedding vector(3072),
   p_match_count int default 20,
-  p_type_filter text default null
+  p_type_filters text[] default null
 )
 returns table (
   id text,
@@ -59,7 +60,7 @@ as $$
     1 - (embedding <=> p_query_embedding) as similarity
   from kb_documents
   where collection = p_collection
-    and (p_type_filter is null or metadata->>'type' = p_type_filter)
+    and (p_type_filters is null or metadata->>'type' = any(p_type_filters))
   order by embedding <=> p_query_embedding
   limit p_match_count;
 $$;

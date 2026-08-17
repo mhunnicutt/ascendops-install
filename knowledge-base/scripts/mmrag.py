@@ -354,6 +354,32 @@ def get_chroma_client():
     return chromadb.PersistentClient(path=str(CHROMADB_DIR))
 
 # ---------------------------------------------------------------------------
+# Storage backend dispatch (C2: chromadb -> Supabase pgvector migration)
+#
+# get_collection()/get_client() are what every ingest/query/status/list/
+# delete/reset call site uses -- they pick chromadb or pgvector based on
+# config["kb_backend"] (default "chromadb", so existing installs are
+# unaffected until explicitly switched). get_chroma_collection()/
+# get_chroma_client() above are kept as-is and untouched: the migration
+# script imports them directly to read the source-of-truth chromadb data
+# regardless of which backend is currently configured as active.
+# ---------------------------------------------------------------------------
+def get_collection(config, collection_name="default"):
+    backend = config.get("kb_backend", "chromadb")
+    if backend == "pgvector":
+        from pgvector_store import PgvectorCollection
+        return PgvectorCollection(collection_name)
+    return get_chroma_collection(collection_name)
+
+
+def get_client(config):
+    backend = config.get("kb_backend", "chromadb")
+    if backend == "pgvector":
+        from pgvector_store import PgvectorClient
+        return PgvectorClient()
+    return get_chroma_client()
+
+# ---------------------------------------------------------------------------
 # Text chunking
 # ---------------------------------------------------------------------------
 def chunk_text(text, chunk_size=DEFAULT_TEXT_CHUNK_SIZE, overlap=DEFAULT_TEXT_CHUNK_OVERLAP):
@@ -1101,7 +1127,7 @@ def cmd_ingest(args):
     config = load_config()
     client = get_genai_client(get_api_key(config))
     collection_name = args.collection or config.get("default_collection", "default")
-    collection = get_chroma_collection(collection_name)
+    collection = get_collection(config, collection_name)
 
     if args_force:
         print(f"Force mode: will re-ingest existing files")
@@ -1239,7 +1265,7 @@ def cmd_query(args):
     config = load_config()
     client = get_genai_client(get_api_key(config))
     collection_name = args.collection or config.get("default_collection", "default")
-    collection = get_chroma_collection(collection_name)
+    collection = get_collection(config, collection_name)
 
     if collection.count() == 0:
         print("Knowledge base is empty. Ingest some files first.")
@@ -1484,7 +1510,7 @@ def cmd_status(args):
     collection_name = args.collection or config.get("default_collection", "default")
 
     try:
-        collection = get_chroma_collection(collection_name)
+        collection = get_collection(config, collection_name)
         count = collection.count()
     except Exception:
         count = 0
@@ -1522,7 +1548,7 @@ def cmd_list(args):
     collection_name = args.collection or config.get("default_collection", "default")
 
     try:
-        collection = get_chroma_collection(collection_name)
+        collection = get_collection(config, collection_name)
     except Exception:
         print("No data found.")
         return
@@ -1550,7 +1576,8 @@ def cmd_list(args):
 
 
 def cmd_collections(args):
-    chroma = get_chroma_client()
+    config = load_config()
+    chroma = get_client(config)
     collections = chroma.list_collections()
     if not collections:
         print("No collections found.")
@@ -1566,7 +1593,7 @@ def cmd_collections(args):
 def cmd_delete(args):
     config = load_config()
     collection_name = args.collection or config.get("default_collection", "default")
-    collection = get_chroma_collection(collection_name)
+    collection = get_collection(config, collection_name)
 
     source_path = str(Path(args.path).resolve())
     all_data = collection.get(include=["metadatas"])
@@ -1589,7 +1616,8 @@ def cmd_reset(args):
         print("ERROR: Pass --confirm to reset the knowledge base.")
         return
 
-    chroma = get_chroma_client()
+    config = load_config()
+    chroma = get_client(config)
     collections = chroma.list_collections()
     count = 0
     for c in collections:
