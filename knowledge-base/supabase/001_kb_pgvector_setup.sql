@@ -29,8 +29,18 @@ create table if not exists kb_documents (
   primary key (collection, id)
 );
 
-create index if not exists kb_documents_embedding_idx
-  on kb_documents using hnsw (embedding vector_cosine_ops);
+-- No vector index (HNSW or IVFFlat) on `embedding`: both pgvector index
+-- types cap out at 2000 dimensions and our Gemini embeddings are 3072 --
+-- this is a hard limit of the index types themselves, not something IVFFlat
+-- fixes over HNSW. Deliberately relying on an unindexed sequential scan
+-- instead: at current scale (~1500 rows total across every collection) this
+-- is exact nearest-neighbor search (strictly MORE accurate than an
+-- approximate HNSW/IVFFlat index would be) and runs in low single-digit
+-- milliseconds -- no real cost today. If a collection grows into the tens
+-- of thousands of rows and sequential-scan latency becomes a real problem,
+-- revisit with pgvector's `halfvec` type (half-precision, indexable up to
+-- 4000 dims -- requires pgvector >= 0.7.0) rather than reducing embedding
+-- dimensionality, which would require re-embedding everything.
 
 create index if not exists kb_documents_collection_idx
   on kb_documents (collection);
