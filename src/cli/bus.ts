@@ -9,7 +9,7 @@ import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
 import { queryCap } from '../bus/query-cap.js';
-import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../bus/system.js';
+import { selfRestart, hardRestart, autoCommit, ensureOrgsGitRepo, checkGoalStaleness, postActivity } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
@@ -896,7 +896,19 @@ busCommand
   .option('--dry-run', 'Show what would be staged without modifying git')
   .action((opts: { dryRun?: boolean }) => {
     const env = resolveEnv();
-    const projectDir = env.projectRoot || env.frameworkRoot || process.cwd();
+    const frameworkRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    // Agent config data (MEMORY.md, GOALS.md, config.json, memory/) lives
+    // under orgs/, which the framework repo deliberately gitignores (it's
+    // the public install repo — see its .gitignore comment). Snapshot
+    // orgs/ in its own local-only repo instead, so it's actually tracked
+    // without ever touching the public repo's history. Falls back to
+    // frameworkRoot itself if orgs/ doesn't exist (e.g. a bare framework
+    // checkout with no org onboarded yet).
+    const orgsDir = join(frameworkRoot, 'orgs');
+    const projectDir = existsSync(orgsDir) ? orgsDir : frameworkRoot;
+    if (projectDir === orgsDir) {
+      ensureOrgsGitRepo(orgsDir);
+    }
     const report = autoCommit(projectDir, opts.dryRun ?? false);
     console.log(JSON.stringify(report));
   });

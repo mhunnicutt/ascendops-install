@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
-import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../../../src/bus/system';
+import { selfRestart, hardRestart, autoCommit, ensureOrgsGitRepo, checkGoalStaleness, postActivity } from '../../../src/bus/system';
 import type { BusPaths } from '../../../src/types';
 
 function makePaths(testDir: string, agent: string = 'test-agent'): BusPaths {
@@ -172,6 +172,98 @@ describe('Bus System', () => {
       const report = autoCommit(gitDir);
       expect(report.status).toBe('nothing_to_stage');
       expect(report.blocked.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('ensureOrgsGitRepo', () => {
+    it('initializes a git repo when orgsDir has none', () => {
+      const orgsDir = join(testDir, 'orgs');
+      mkdirSync(orgsDir, { recursive: true });
+
+      ensureOrgsGitRepo(orgsDir);
+
+      expect(existsSync(join(orgsDir, '.git'))).toBe(true);
+    });
+
+    it('writes a .gitignore that excludes secrets', () => {
+      const orgsDir = join(testDir, 'orgs');
+      mkdirSync(orgsDir, { recursive: true });
+
+      ensureOrgsGitRepo(orgsDir);
+
+      const gitignore = readFileSync(join(orgsDir, '.gitignore'), 'utf-8');
+      expect(gitignore).toContain('.env');
+      expect(gitignore).toContain('secrets.env');
+      expect(gitignore).toContain('.cortextos-env');
+    });
+
+    it('is a no-op when orgsDir already has its own .git', () => {
+      const orgsDir = join(testDir, 'orgs');
+      mkdirSync(orgsDir, { recursive: true });
+      execSync('git init', { cwd: orgsDir, stdio: 'pipe' });
+      execSync('git config user.email "someone@else.com"', { cwd: orgsDir, stdio: 'pipe' });
+      execSync('git config user.name "Someone Else"', { cwd: orgsDir, stdio: 'pipe' });
+      writeFileSync(join(orgsDir, '.gitignore'), 'custom-rule\n');
+
+      ensureOrgsGitRepo(orgsDir);
+
+      // Untouched — a pre-existing .gitignore must not be clobbered.
+      expect(readFileSync(join(orgsDir, '.gitignore'), 'utf-8')).toBe('custom-rule\n');
+      const email = execSync('git config user.email', { cwd: orgsDir, encoding: 'utf-8' }).trim();
+      expect(email).toBe('someone@else.com');
+    });
+
+    it('does not walk up to a parent repo — orgsDir nested inside an outer repo still gets its own .git', () => {
+      // Reproduces the exact bug this fixes: a naive `git rev-parse
+      // --is-inside-work-tree` check from orgsDir would find the OUTER
+      // repo's .git and wrongly conclude orgsDir is "already a repo".
+      execSync('git init', { cwd: testDir, stdio: 'pipe' });
+      const orgsDir = join(testDir, 'orgs');
+      mkdirSync(orgsDir, { recursive: true });
+
+      ensureOrgsGitRepo(orgsDir);
+
+      expect(existsSync(join(orgsDir, '.git'))).toBe(true);
+    });
+
+    it('is a no-op when orgsDir does not exist', () => {
+      const missing = join(testDir, 'does-not-exist');
+      expect(() => ensureOrgsGitRepo(missing)).not.toThrow();
+      expect(existsSync(missing)).toBe(false);
+    });
+
+    it('autoCommit then sees the new agent tree once the repo is initialized', () => {
+      // A brand-new, wholly-untracked directory collapses to one line in
+      // git status (this is normal git behavior, not specific to this
+      // repo) -- `git add` on it still stages every file inside.
+      const orgsDir = join(testDir, 'orgs');
+      mkdirSync(join(orgsDir, 'foothills-pm', 'agents', 'anna'), { recursive: true });
+      ensureOrgsGitRepo(orgsDir);
+      writeFileSync(join(orgsDir, 'foothills-pm', 'agents', 'anna', 'MEMORY.md'), '# Memory\n');
+
+      const report = autoCommit(orgsDir, true);
+      expect(report.status).toBe('dry_run');
+      expect(report.staged).toContain('foothills-pm/');
+
+      const staged = autoCommit(orgsDir, false);
+      expect(staged.status).toBe('staged');
+      const tracked = execSync('git diff --cached --name-only', { cwd: orgsDir, encoding: 'utf-8' });
+      expect(tracked).toContain('foothills-pm/agents/anna/MEMORY.md');
+    });
+
+    it('autoCommit reports granular per-file paths once the directory has prior history', () => {
+      const orgsDir = join(testDir, 'orgs');
+      const agentDir = join(orgsDir, 'foothills-pm', 'agents', 'anna');
+      mkdirSync(agentDir, { recursive: true });
+      ensureOrgsGitRepo(orgsDir);
+      writeFileSync(join(agentDir, 'config.json'), '{}');
+      autoCommit(orgsDir, false); // stage + establish history for the directory
+      execSync('git commit -m "seed"', { cwd: orgsDir, stdio: 'pipe' });
+
+      writeFileSync(join(agentDir, 'MEMORY.md'), '# Memory\n');
+      const report = autoCommit(orgsDir, true);
+
+      expect(report.staged).toContain('foothills-pm/agents/anna/MEMORY.md');
     });
   });
 
