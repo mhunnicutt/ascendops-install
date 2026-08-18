@@ -238,16 +238,27 @@ function sendCrashLoopAlertBestEffort(
 }
 
 // ---------------------------------------------------------------------------
-// Login-expiry watchdog: scan each agent's stdout.log for the Claude Code
-// login-expiry countdown banner ("Your login expires in N days") and alert
-// the operator once it drops to LOGIN_EXPIRY_ALERT_THRESHOLD_DAYS or fewer.
-// Context: the 2026-08-12 fleet-wide 19h outage was root-caused to a shared
-// Claude account session expiring silently — every agent's log had already
-// printed this exact countdown banner (3 -> 2 -> 1 days) in the days before,
-// completely unread. Passive post-failure log scanning can't catch the hang
-// itself (confirmed: no auth-error text ever appears once a session is
-// actually dead), but this banner is a free, already-present early-warning
-// signal that just needs something to read it. This watchdog runs on the
+// Login-expiry watchdog: scan each agent's stdout.log for two Claude Code
+// signals — a proactive countdown banner ("Your login expires in N days")
+// and a reactive dead-session line ("Login expired · Please run /login") —
+// and alert the operator on either. Context: the 2026-08-12 fleet-wide 19h
+// outage was root-caused to a shared Claude account session expiring
+// silently. Every agent's log had already printed the countdown banner
+// (3 -> 2 -> 1 days) in the days before, completely unread — that's the
+// proactive half below. The original version of this watchdog (2026-08-16)
+// additionally assumed no auth-error text ever appears once a session is
+// actually dead, and shipped countdown-only. That assumption was wrong:
+// confirmed 2026-08-18 by grepping the actual incident-window logs, "Login
+// expired · Please run /login" appears verbatim, every time a cron injects
+// into a dead session, on every affected agent (378/68/42/32 occurrences
+// across maintenance/kpi/reni/anna, all timestamped inside the exact
+// 01:03:46-20:48:33 UTC incident window; master had zero, consistent with
+// the shared credential dying under the specialist agents while master's
+// own session stayed valid). That's the reactive half — it can't give
+// advance warning the way the countdown banner can, but it fires the moment
+// a session is confirmed dead rather than waiting on the operator to notice,
+// and it doesn't depend on the countdown banner having been seen in time.
+// Both signals are free, already-present, and this watchdog runs on the
 // daemon's own interval, independent of any agent session, so it keeps
 // working even as a fleet-wide dark period approaches.
 //
@@ -257,25 +268,29 @@ function sendCrashLoopAlertBestEffort(
 // and empirically failed within hours of boot — verified against live logs
 // on 2026-08-16, it missed 4 of 5 agents once normal session output pushed
 // the banner past a 200KB tail window. Fix: track a per-agent byte offset
-// and scan only NEW bytes since the last poll, so the banner is caught
+// and scan only NEW bytes since the last poll, so either signal is caught
 // within one poll interval of being printed regardless of file size or
-// how much has accumulated since. A captured reading is treated as stale
-// after LOGIN_EXPIRY_READING_TTL_MS so a stale pre-/login reading can't
-// alert forever after the credential has actually been renewed (renewal
-// itself may not print a fresh banner for days, since it only appears when
-// close to expiry).
+// how much has accumulated since. A captured countdown reading is treated
+// as stale after LOGIN_EXPIRY_READING_TTL_MS so a stale pre-/login reading
+// can't alert forever after the credential has actually been renewed
+// (renewal itself may not print a fresh banner for days, since it only
+// appears when close to expiry). The dead-session signal needs no such TTL
+// — it's evaluated fresh each poll from the new-bytes slice only, so it
+// naturally stops firing once a renewed session stops printing it.
 // ---------------------------------------------------------------------------
 
 export const LOGIN_EXPIRY_ALERT_THRESHOLD_DAYS = 1;
 export const LOGIN_EXPIRY_WATCHDOG_INTERVAL_MS = 15 * 60 * 1000;   // poll cadence
 export const LOGIN_EXPIRY_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;  // re-alert cadence while still expiring soon
 export const LOGIN_EXPIRY_READING_TTL_MS = 20 * 60 * 60 * 1000;    // a captured reading older than this is ignored — just under the daily restart cadence, so a renewed credential's stale "1 day" reading can't out-live the next legitimate boot
+export const LOGIN_EXPIRED_ALERT_COOLDOWN_MS = 60 * 60 * 1000;     // re-alert cadence for a confirmed-dead session — shorter than the countdown cooldown since this is an active outage, not an early warning
 
 export interface LoginExpiryAgentState {
   offset: number;
   daysRemaining: number | null;
   capturedAt: string | null;
   lastAlertAt: string | null;
+  lastExpiredAlertAt: string | null;
 }
 
 export type LoginExpiryState = Record<string, LoginExpiryAgentState>;
@@ -304,10 +319,13 @@ export function writeLoginExpiryState(ctxRoot: string, state: LoginExpiryState):
 }
 
 /**
- * Scan the bytes of an agent's stdout.log written since `fromOffset` for the
- * Claude Code login-expiry countdown banner. Returns the new end-of-file
- * offset (to persist for next poll) and the LAST (most recent) banner
- * reading found in that new slice, or null if none appeared.
+ * Scan the bytes of an agent's stdout.log written since `fromOffset` for two
+ * Claude Code signals: the login-expiry countdown banner, and the reactive
+ * "Login expired" line printed when a cron/message injects into an already-
+ * dead session. Returns the new end-of-file offset (to persist for next
+ * poll), the LAST (most recent) countdown reading found in that new slice
+ * (or null if none appeared), and whether the dead-session line appeared at
+ * all in the new slice.
  *
  * Handles log rotation/truncation: if the current file size is smaller than
  * fromOffset (output-buffer.ts rotated stdout.log to stdout.log.1 and
@@ -317,15 +335,15 @@ export function writeLoginExpiryState(ctxRoot: string, state: LoginExpiryState):
 export function scanNewLoginExpiryReading(
   logPath: string,
   fromOffset: number,
-): { newOffset: number; daysRemaining: number | null } {
+): { newOffset: number; daysRemaining: number | null; loginExpiredDetected: boolean } {
   let size: number;
   try {
     size = statSync(logPath).size;
   } catch {
-    return { newOffset: fromOffset, daysRemaining: null };
+    return { newOffset: fromOffset, daysRemaining: null, loginExpiredDetected: false };
   }
   const startAt = size < fromOffset ? 0 : fromOffset;
-  if (size <= startAt) return { newOffset: size, daysRemaining: null };
+  if (size <= startAt) return { newOffset: size, daysRemaining: null, loginExpiredDetected: false };
   try {
     const fd = readFileSync(logPath);
     const slice = fd.slice(startAt, size).toString('utf-8');
@@ -334,24 +352,30 @@ export function scanNewLoginExpiryReading(
     const daysRemaining = matches.length === 0
       ? null
       : Number.parseInt(matches[matches.length - 1][1], 10);
-    return { newOffset: size, daysRemaining };
+    const loginExpiredDetected = /login expired/i.test(text);
+    return { newOffset: size, daysRemaining, loginExpiredDetected };
   } catch {
-    return { newOffset: size, daysRemaining: null };
+    return { newOffset: size, daysRemaining: null, loginExpiredDetected: false };
   }
 }
 
 /**
  * Advance every agent's offset by scanning new log bytes since the last
  * poll, updating captured readings in place, and returning the mutated
- * state alongside the set of agents whose CURRENT, non-stale reading is at
- * or below thresholdDays.
+ * state alongside (a) the set of agents whose CURRENT, non-stale countdown
+ * reading is at or below thresholdDays, and (b) the set of agents whose new
+ * slice this poll contained the reactive "Login expired" dead-session line.
  */
 export function pollLoginExpiryReadings(
   ctxRoot: string,
   state: LoginExpiryState,
   thresholdDays: number = LOGIN_EXPIRY_ALERT_THRESHOLD_DAYS,
   now: number = Date.now(),
-): { state: LoginExpiryState; expiring: Array<{ agent: string; daysRemaining: number }> } {
+): {
+  state: LoginExpiryState;
+  expiring: Array<{ agent: string; daysRemaining: number }>;
+  expired: string[];
+} {
   const logsDir = join(ctxRoot, 'logs');
   let agentDirs: string[];
   try {
@@ -359,10 +383,11 @@ export function pollLoginExpiryReadings(
       .filter(d => d.isDirectory())
       .map(d => d.name);
   } catch {
-    return { state, expiring: [] };
+    return { state, expiring: [], expired: [] };
   }
 
   const expiring: Array<{ agent: string; daysRemaining: number }> = [];
+  const expired: string[] = [];
   for (const agent of agentDirs) {
     const logPath = join(logsDir, agent, 'stdout.log');
     if (!existsSync(logPath)) continue;
@@ -372,8 +397,9 @@ export function pollLoginExpiryReadings(
       daysRemaining: null,
       capturedAt: null,
       lastAlertAt: null,
+      lastExpiredAlertAt: null,
     };
-    const { newOffset, daysRemaining } = scanNewLoginExpiryReading(logPath, prior.offset);
+    const { newOffset, daysRemaining, loginExpiredDetected } = scanNewLoginExpiryReading(logPath, prior.offset);
 
     const next: LoginExpiryAgentState = { ...prior, offset: newOffset };
     if (daysRemaining !== null) {
@@ -382,6 +408,8 @@ export function pollLoginExpiryReadings(
     }
     state[agent] = next;
 
+    if (loginExpiredDetected) expired.push(agent);
+
     if (next.daysRemaining === null || !next.capturedAt) continue;
     const age = now - Date.parse(next.capturedAt);
     if (Number.isNaN(age) || age > LOGIN_EXPIRY_READING_TTL_MS) continue;
@@ -389,7 +417,7 @@ export function pollLoginExpiryReadings(
       expiring.push({ agent, daysRemaining: next.daysRemaining });
     }
   }
-  return { state, expiring };
+  return { state, expiring, expired };
 }
 
 /**
@@ -411,6 +439,59 @@ export function selectLoginExpiryAgentsToAlert(
     if (Number.isNaN(lastAlertMs)) return true;
     return now - lastAlertMs >= LOGIN_EXPIRY_ALERT_COOLDOWN_MS;
   });
+}
+
+/**
+ * Filter agents with a confirmed dead-session detection this poll down to
+ * those due a NEW alert: never alerted, or past LOGIN_EXPIRED_ALERT_COOLDOWN_MS
+ * since the last one for that agent. Separate cooldown state from
+ * selectLoginExpiryAgentsToAlert so the two signals re-alert independently.
+ */
+export function selectLoginExpiredAgentsToAlert(
+  expired: string[],
+  state: LoginExpiryState,
+  now: number = Date.now(),
+): string[] {
+  return expired.filter(agent => {
+    const lastAlert = state[agent]?.lastExpiredAlertAt;
+    if (!lastAlert) return true;
+    const lastAlertMs = Date.parse(lastAlert);
+    if (Number.isNaN(lastAlertMs)) return true;
+    return now - lastAlertMs >= LOGIN_EXPIRED_ALERT_COOLDOWN_MS;
+  });
+}
+
+function sendLoginExpiredAlertBestEffort(
+  frameworkRoot: string,
+  toAlert: string[],
+): boolean {
+  const creds = getOperatorChatCreds(frameworkRoot);
+  if (!creds) {
+    console.error('[daemon] Login-expired alert: no operator chat configured ' +
+      '(set CTX_OPERATOR_CHAT_ID + CTX_OPERATOR_BOT_TOKEN, or ensure at least one agent .env exists)');
+    return false;
+  }
+  const lines = toAlert.map(agent => `  - ${agent}`);
+  const message =
+    `🚨 Claude session already expired (not just expiring soon):\n${lines.join('\n')}\n` +
+    `These agents are currently dead, not just at risk — run /login now to restore the shared session.`;
+  try {
+    const r = spawnSync('curl', [
+      '-s', '--max-time', '3',
+      '-X', 'POST',
+      `https://api.telegram.org/bot${creds.botToken}/sendMessage`,
+      '-d', `chat_id=${creds.chatId}`,
+      '--data-urlencode', `text=${message}`,
+    ], { timeout: TELEGRAM_SEND_TIMEOUT_MS, stdio: 'pipe' });
+    if (r.status === 0) {
+      console.error(`[daemon] Login-expired alert sent for ${toAlert.length} agent(s)`);
+      return true;
+    }
+    console.error('[daemon] Login-expired alert send failed (non-fatal)');
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function sendLoginExpiryAlertBestEffort(
@@ -448,14 +529,21 @@ function sendLoginExpiryAlertBestEffort(
 
 export function runLoginExpiryWatchdogCheck(ctxRoot: string, frameworkRoot: string): void {
   const priorState = readLoginExpiryState(ctxRoot);
-  const { state, expiring } = pollLoginExpiryReadings(ctxRoot, priorState);
+  const { state, expiring, expired } = pollLoginExpiryReadings(ctxRoot, priorState);
   // Always persist — offsets must advance even when nothing is currently
-  // expiring, or the next poll would rescan already-processed bytes.
+  // expiring/expired, or the next poll would rescan already-processed bytes.
   const toAlert = expiring.length === 0 ? [] : selectLoginExpiryAgentsToAlert(expiring, state);
   if (toAlert.length > 0 && sendLoginExpiryAlertBestEffort(frameworkRoot, toAlert)) {
     const now = new Date().toISOString();
     for (const e of toAlert) state[e.agent].lastAlertAt = now;
   }
+
+  const toAlertExpired = expired.length === 0 ? [] : selectLoginExpiredAgentsToAlert(expired, state);
+  if (toAlertExpired.length > 0 && sendLoginExpiredAlertBestEffort(frameworkRoot, toAlertExpired)) {
+    const now = new Date().toISOString();
+    for (const agent of toAlertExpired) state[agent].lastExpiredAlertAt = now;
+  }
+
   writeLoginExpiryState(ctxRoot, state);
 }
 
