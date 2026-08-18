@@ -24,6 +24,7 @@ import { addCron, removeCron, readCrons, updateCron as updateCronDef, getCronByN
 import { nextFireFromCron } from '../daemon/cron-scheduler.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
+import { checkClaudeLoginHealth } from '../bus/claude-login.js';
 import { createSkillPr } from '../bus/skill-autopr.js';
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -3115,6 +3116,43 @@ busCommand
       const warn7d = acct.seven_day_utilization >= ALERT_7D ? ' ⚠️' : '';
       console.log(`${name}${active}`);
       console.log(`  5h: ${pct(acct.five_hour_utilization)}${warn5h}  7d: ${pct(acct.seven_day_utilization)}${warn7d}  expires: ${expiry}`);
+    }
+  });
+
+busCommand
+  .command('check-claude-login')
+  .description('Check native Claude Code login credential (~/.claude/.credentials.json) expiry — non-sensitive fields only')
+  .option('--json', 'Output as JSON')
+  .action((opts: { json?: boolean }) => {
+    const result = checkClaudeLoginHealth();
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      switch (result.status) {
+        case 'ok':
+          console.log(`OK: access token valid ${result.access_minutes_remaining}m more, refresh token valid ${result.refresh_days_remaining}d more.`);
+          break;
+        case 'access_stale':
+          console.log(`WARN: access token has been expired for ${-result.access_minutes_remaining!}m with no self-refresh (refresh token still has ${result.refresh_days_remaining}d left).`);
+          break;
+        case 'refresh_expiring':
+          console.log(`ALERT: refresh token expires in ${result.refresh_days_remaining}d (${result.refresh_expires_at}) — a human needs to run /login before then.`);
+          break;
+        case 'refresh_expired':
+          console.log(`ALERT: refresh token is EXPIRED as of ${result.refresh_expires_at} — the shared Claude Code login is dead. A human needs to run /login now.`);
+          break;
+        case 'not_found':
+          console.log('ALERT: no ~/.claude/.credentials.json found — cannot verify login health.');
+          break;
+        case 'unreadable':
+          console.log('ALERT: ~/.claude/.credentials.json exists but could not be parsed — cannot verify login health.');
+          break;
+      }
+    }
+    if (result.status === 'refresh_expired' || result.status === 'refresh_expiring' || result.status === 'not_found' || result.status === 'unreadable') {
+      process.exit(1);
+    } else if (result.status === 'access_stale') {
+      process.exit(2);
     }
   });
 

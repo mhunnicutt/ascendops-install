@@ -109,6 +109,7 @@ export class FastChecker {
   private usageLastCheckedAt: number = Date.now(); // skip check on startup; first run at 30-min mark
   private usageTier: 0 | 1 | 2 = 0; // 0=normal, 1=high(≥85%), 2=critical(≥95%)
   private usageTierFile: string = '';
+  private usageTierUnavailableLogged: boolean = false;
   private readonly USAGE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 
   // Context-exhaustion + frozen-stdout watchdog state
@@ -1155,18 +1156,47 @@ export class FastChecker {
   }
 
   /**
+   * Whether a token source exists for check-usage-api (accounts.json or
+   * CLAUDE_CODE_OAUTH_TOKEN). Cheap fs/env check — safe to call every cycle.
+   */
+  private hasOAuthTokenSource(): boolean {
+    if (process.env.CLAUDE_CODE_OAUTH_TOKEN) return true;
+    try {
+      return existsSync(join(this.paths.ctxRoot, 'state', 'oauth', 'accounts.json'));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Check Claude Max API utilization and send tier-transition alerts.
    *
-   * Runs every 15 minutes. Calls `cortextos bus check-usage-api` and reads
+   * Runs every 30 minutes. Calls `cortextos bus check-usage-api` and reads
    * the JSON output. Computes tier (0=normal, 1=high≥85%, 2=critical≥95%).
    * On tier change: sends a Telegram alert directly (no Claude wake) and
    * writes an inbox message so Claude acts on it next time it is awake.
    * Tier state persists across restarts in usage-tier.json.
+   *
+   * check-usage-api requires an OAuth token source (accounts.json or
+   * CLAUDE_CODE_OAUTH_TOKEN) — a deployment authenticated only via the
+   * native Claude Code login (~/.claude/.credentials.json, no accounts.json)
+   * has neither, so the check is skipped rather than spawning a process
+   * every cycle just to hit "No OAuth token available." Login-credential
+   * health for that deployment shape is covered separately by the
+   * check-claude-login cron.
    */
   private async checkUsageTier(): Promise<void> {
     const now = Date.now();
     if (now - this.usageLastCheckedAt < this.USAGE_CHECK_INTERVAL_MS) return;
     this.usageLastCheckedAt = now;
+
+    if (!this.hasOAuthTokenSource()) {
+      if (!this.usageTierUnavailableLogged) {
+        this.log('Usage tier check skipped: no accounts.json or CLAUDE_CODE_OAUTH_TOKEN configured for this deployment.');
+        this.usageTierUnavailableLogged = true;
+      }
+      return;
+    }
 
     let rawJson = '';
     try {
