@@ -1165,7 +1165,20 @@ busCommand
   .option('--dry-run', 'Show what would be staged without modifying git')
   .action((opts: { dryRun?: boolean }) => {
     const env = resolveEnv();
-    const projectDir = env.projectRoot || env.frameworkRoot || process.cwd();
+    const frameworkRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    // Agent state (MEMORY.md, GOALS.md, config.json) lives under orgs/,
+    // which the framework repo deliberately gitignores (it's the public
+    // install repo — see its .gitignore comment). autoCommit's scope check
+    // only ever matches org/agent-scoped paths, so it needs to operate
+    // against a repo that actually has orgs/ at its root. Falls back to
+    // frameworkRoot itself if orgs/ doesn't exist (e.g. a bare framework
+    // checkout with no org onboarded yet) — autoCommit will just report
+    // clean/nothing_to_stage there since the scope can never match.
+    // autoCommit() itself calls ensureOrgsGitRepo(), AFTER acquiring the
+    // lease — not here, where two racing callers could both see "no repo
+    // yet" and collide on `git init` before either held the lease.
+    const orgsDir = join(frameworkRoot, 'orgs');
+    const projectDir = existsSync(orgsDir) ? orgsDir : frameworkRoot;
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     let ttlMs: number;
     try {

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
-import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../../../src/bus/system';
+import { selfRestart, hardRestart, autoCommit, ensureOrgsGitRepo, checkGoalStaleness, postActivity } from '../../../src/bus/system';
 import { acquireAutoCommitLease, getAutoCommitLeaseStatus } from '../../../src/bus/auto-commit-lease';
 import type { BusPaths } from '../../../src/types';
 
@@ -82,11 +82,15 @@ describe('Bus System', () => {
   });
 
   describe('autoCommit', () => {
+    // gitDir plays the role of the local orgs/.git snapshot repo (see
+    // ensureOrgsGitRepo) — its ROOT is orgs/, not the framework root, so
+    // paths below have no "orgs/" prefix. See the ensureOrgsGitRepo
+    // describe block below for the CLI-level wiring that makes this true.
     let gitDir: string;
     const scope = { org: 'acme', agent: 'alice' };
 
     function writeAgentFile(relativePath: string, content: string): void {
-      const fullPath = join(gitDir, 'orgs', scope.org, 'agents', scope.agent, relativePath);
+      const fullPath = join(gitDir, scope.org, 'agents', scope.agent, relativePath);
       mkdirSync(join(fullPath, '..'), { recursive: true });
       writeFileSync(fullPath, content);
     }
@@ -120,7 +124,7 @@ describe('Bus System', () => {
 
       const report = runAutoCommit(true);
       expect(report.blocked.some(b => b.includes('config.json') && b.includes('credential'))).toBe(true);
-      expect(report.staged).toContain('orgs/acme/agents/alice/MEMORY.md');
+      expect(report.staged).toContain('acme/agents/alice/MEMORY.md');
     });
 
     it('dry-run does not stage files', () => {
@@ -179,7 +183,7 @@ describe('Bus System', () => {
 
       const report = runAutoCommit();
       expect(report.status).toBe('staged');
-      expect(report.staged).toContain('orgs/acme/agents/alice/MEMORY.md');
+      expect(report.staged).toContain('acme/agents/alice/MEMORY.md');
       expect(report.lease).toEqual({
         status: 'held',
         holder: scope,
@@ -190,7 +194,7 @@ describe('Bus System', () => {
 
       // Verify file is actually staged
       const staged = execSync('git diff --cached --name-only', { cwd: gitDir, encoding: 'utf-8' });
-      expect(staged.trim()).toContain('orgs/acme/agents/alice/MEMORY.md');
+      expect(staged.trim()).toContain('acme/agents/alice/MEMORY.md');
     });
 
     it('returns nothing_to_stage when all files blocked', () => {
@@ -209,7 +213,7 @@ describe('Bus System', () => {
       writeAgentFile('GOALS.md', 'safe goals');
       writeAgentFile('config.json', '{"enabled":true}');
       writeAgentFile('AGENTS.md', 'broad bootstrap content');
-      const otherAgentMemory = join(gitDir, 'orgs', 'acme', 'agents', 'bob', 'memory');
+      const otherAgentMemory = join(gitDir, 'acme', 'agents', 'bob', 'memory');
       mkdirSync(otherAgentMemory, { recursive: true });
       writeFileSync(join(otherAgentMemory, '2026-07-31.md'), 'other agent state');
       mkdirSync(join(gitDir, 'dashboard'), { recursive: true });
@@ -229,24 +233,24 @@ describe('Bus System', () => {
       expect(report.status).toBe('staged');
       expect(report.staged.sort()).toEqual(actualIndex.sort());
       expect(actualIndex.sort()).toEqual([
-        'orgs/acme/agents/alice/GOALS.md',
-        'orgs/acme/agents/alice/MEMORY.md',
-        'orgs/acme/agents/alice/config.json',
+        'acme/agents/alice/GOALS.md',
+        'acme/agents/alice/MEMORY.md',
+        'acme/agents/alice/config.json',
       ]);
       expect(report.blocked).toEqual(expect.arrayContaining([
         expect.stringContaining('dashboard/cortextos.db:outside_agent_state_scope'),
         expect.stringContaining('dashboard/cortextos.db-wal:outside_agent_state_scope'),
         expect.stringContaining('__pycache__/worker.pyc:outside_agent_state_scope'),
         expect.stringContaining('dist.rollback-20260717/cli.js:outside_agent_state_scope'),
-        expect.stringContaining('orgs/acme/agents/alice/AGENTS.md:outside_agent_state_scope'),
-        expect.stringContaining('orgs/acme/agents/alice/memory/2026-07-31.md:outside_agent_state_scope'),
-        expect.stringContaining('orgs/acme/agents/bob/memory/2026-07-31.md:outside_agent_state_scope'),
+        expect.stringContaining('acme/agents/alice/AGENTS.md:outside_agent_state_scope'),
+        expect.stringContaining('acme/agents/alice/memory/2026-07-31.md:outside_agent_state_scope'),
+        expect.stringContaining('acme/agents/bob/memory/2026-07-31.md:outside_agent_state_scope'),
       ]));
     });
 
     it('refuses a force-tracked daily memory file outside the three-class scope', () => {
-      const dailyMemory = 'orgs/acme/agents/alice/memory/2026-08-01.md';
-      writeFileSync(join(gitDir, '.gitignore'), 'orgs/*/agents/*/memory/\n');
+      const dailyMemory = 'acme/agents/alice/memory/2026-08-01.md';
+      writeFileSync(join(gitDir, '.gitignore'), '*/agents/*/memory/\n');
       writeAgentFile('memory/2026-08-01.md', 'tracked baseline');
       execSync(`git add .gitignore && git add -f ${dailyMemory} && git commit -m "track legacy daily memory"`, {
         cwd: gitDir,
@@ -289,7 +293,7 @@ describe('Bus System', () => {
 
     it('refuses a nonempty index atomically and names the staged paths', () => {
       writeAgentFile('MEMORY.md', 'existing index state');
-      execSync('git add orgs/acme/agents/alice/MEMORY.md', { cwd: gitDir });
+      execSync('git add acme/agents/alice/MEMORY.md', { cwd: gitDir });
       writeAgentFile('GOALS.md', 'must remain unstaged');
 
       const report = runAutoCommit();
@@ -300,9 +304,9 @@ describe('Bus System', () => {
 
       expect(report.status).toBe('error');
       expect(report.error).toContain('1 staged path');
-      expect(report.error).toContain('orgs/acme/agents/alice/MEMORY.md');
+      expect(report.error).toContain('acme/agents/alice/MEMORY.md');
       expect(report.staged).toEqual(actualIndex);
-      expect(actualIndex).not.toContain('orgs/acme/agents/alice/GOALS.md');
+      expect(actualIndex).not.toContain('acme/agents/alice/GOALS.md');
       expect(report.lease.status).toBe('released');
       expect(getAutoCommitLeaseStatus(testDir)).toEqual({ status: 'none' });
     });
@@ -379,6 +383,77 @@ describe('Bus System', () => {
       expect(actualIndex.trim()).toBe('');
       expect(report.lease.status).toBe('released');
       expect(getAutoCommitLeaseStatus(testDir)).toEqual({ status: 'none' });
+    });
+  });
+
+  describe('ensureOrgsGitRepo', () => {
+    it('initializes a git repo when orgsDir has none', () => {
+      const orgsDir = join(testDir, 'orgs');
+      mkdirSync(orgsDir, { recursive: true });
+
+      ensureOrgsGitRepo(orgsDir);
+
+      expect(existsSync(join(orgsDir, '.git'))).toBe(true);
+    });
+
+    it('writes a .gitignore that excludes secrets', () => {
+      const orgsDir = join(testDir, 'orgs');
+      mkdirSync(orgsDir, { recursive: true });
+
+      ensureOrgsGitRepo(orgsDir);
+
+      const gitignore = readFileSync(join(orgsDir, '.gitignore'), 'utf-8');
+      expect(gitignore).toContain('.env');
+      expect(gitignore).toContain('secrets.env');
+      expect(gitignore).toContain('.cortextos-env');
+    });
+
+    it('is a no-op when orgsDir already has its own .git', () => {
+      const orgsDir = join(testDir, 'orgs');
+      mkdirSync(orgsDir, { recursive: true });
+      execSync('git init', { cwd: orgsDir, stdio: 'pipe' });
+      execSync('git config user.email "someone@else.com"', { cwd: orgsDir, stdio: 'pipe' });
+      execSync('git config user.name "Someone Else"', { cwd: orgsDir, stdio: 'pipe' });
+      writeFileSync(join(orgsDir, '.gitignore'), 'custom-rule\n');
+
+      ensureOrgsGitRepo(orgsDir);
+
+      // Untouched — a pre-existing .gitignore must not be clobbered.
+      expect(readFileSync(join(orgsDir, '.gitignore'), 'utf-8')).toBe('custom-rule\n');
+      const email = execSync('git config user.email', { cwd: orgsDir, encoding: 'utf-8' }).trim();
+      expect(email).toBe('someone@else.com');
+    });
+
+    it('does not walk up to a parent repo — orgsDir nested inside an outer repo still gets its own .git', () => {
+      // Reproduces the exact bug this fixes: a naive `git rev-parse
+      // --is-inside-work-tree` check from orgsDir would find the OUTER
+      // repo's .git and wrongly conclude orgsDir is "already a repo".
+      execSync('git init', { cwd: testDir, stdio: 'pipe' });
+      const orgsDir = join(testDir, 'orgs');
+      mkdirSync(orgsDir, { recursive: true });
+
+      ensureOrgsGitRepo(orgsDir);
+
+      expect(existsSync(join(orgsDir, '.git'))).toBe(true);
+    });
+
+    it('is a no-op when orgsDir does not exist', () => {
+      const missing = join(testDir, 'does-not-exist');
+      expect(() => ensureOrgsGitRepo(missing)).not.toThrow();
+      expect(existsSync(missing)).toBe(false);
+    });
+
+    it('autoCommit sees real agent-state changes once the repo is initialized', () => {
+      const orgsDir = join(testDir, 'orgs');
+      const agentDir = join(orgsDir, 'acme', 'agents', 'alice');
+      mkdirSync(agentDir, { recursive: true });
+      ensureOrgsGitRepo(orgsDir);
+      writeFileSync(join(agentDir, 'MEMORY.md'), '# Memory\n');
+
+      const report = autoCommit(orgsDir, true, { org: 'acme', agent: 'alice' }, { ctxRoot: testDir, now: 1_000 });
+
+      expect(report.status).toBe('dry_run');
+      expect(report.staged).toContain('acme/agents/alice/MEMORY.md');
     });
   });
 

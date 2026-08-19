@@ -13,13 +13,29 @@ The 2026-07-31 incident staged 147 files and about 194,743 insertions, including
 
 Only these paths for the invoking agent are eligible:
 
-- `orgs/$CTX_ORG/agents/$CTX_AGENT_NAME/MEMORY.md`
-- `orgs/$CTX_ORG/agents/$CTX_AGENT_NAME/GOALS.md`
-- `orgs/$CTX_ORG/agents/$CTX_AGENT_NAME/config.json`
+- `$CTX_ORG/agents/$CTX_AGENT_NAME/MEMORY.md`
+- `$CTX_ORG/agents/$CTX_AGENT_NAME/GOALS.md`
+- `$CTX_ORG/agents/$CTX_AGENT_NAME/config.json`
 
 Daily `memory/` journals remain excluded from Git pending David's privacy ruling in `task_1785556710544_11012959`; they are not part of the active allowlist.
 
-Everything else is reported as blocked. Gitignore still governs whether an allowlisted path is visible to Git.
+Everything else is reported as blocked.
+
+## Where This Actually Runs
+
+`orgs/` lives inside `$CTX_FRAMEWORK_ROOT` but is its own, separate, **local-only** git
+repo (`$CTX_FRAMEWORK_ROOT/orgs/.git`) — not part of the framework repo's history. That's
+why the paths above have no `orgs/` prefix: this workflow's git commands run with cwd
+*inside* `orgs/`, where it's already the repo root.
+
+`$CTX_FRAMEWORK_ROOT` is the public install repo; it deliberately gitignores `orgs/`
+entirely, because org data is real business/PII data that must never land in a public
+repo's history (see that repo's `.gitignore` comment on the `orgs/` line — a fast-follow
+after a 2026-06-02 PII leak). Gitignore still governs what's visible to Git *in that outer
+repo* — which is exactly why this workflow doesn't operate there. `cortextos bus
+auto-commit` creates the `orgs/.git` repo automatically on first run if it doesn't exist
+yet (once the lease from the next section is held, so concurrent first-runs can't race
+`git init`), and never configures a remote for it — there is nothing to push to, ever.
 
 ## Single-Writer Boundary
 
@@ -33,7 +49,7 @@ The lease serializes auto-commit writers only. Do not start during a protected b
 
    ```bash
    cortextos bus auto-commit-lease-status
-   cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"
+   cd "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}/orgs"
    test -z "$(git diff --cached --name-only)" || { echo "Refusing: git index is not empty"; return 1 2>/dev/null || exit 1; }
    ```
 

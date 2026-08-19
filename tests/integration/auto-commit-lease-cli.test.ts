@@ -64,6 +64,23 @@ describeBuilt('auto-commit lease CLI', () => {
     }
   }
 
+  // autoCommit now operates against its own local orgs/.git repo (created
+  // on first use by ensureOrgsGitRepo), separate from the outer
+  // frameworkRoot repo this suite sets up above -- it starts with zero
+  // commits, so a fresh HEAD or "clean" tree isn't available until
+  // something has actually been committed there. Tests that assume a
+  // pre-existing baseline (a prior HEAD, no pending changes from the
+  // per-agent config.json files beforeEach already wrote) call this first
+  // to establish one, mirroring what a real first bootstrap cycle does.
+  function seedOrgsBaseline() {
+    const orgsDir = join(frameworkRoot, 'orgs');
+    execFileSync('git', ['init'], { cwd: orgsDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'test.invalid'], { cwd: orgsDir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: orgsDir });
+    execFileSync('git', ['add', '-A'], { cwd: orgsDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'baseline'], { cwd: orgsDir, stdio: 'pipe' });
+  }
+
   it('holds across staging, refuses another agent, and requires exact-token release', async () => {
     writeFileSync(join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', 'MEMORY.md'), 'state');
 
@@ -92,7 +109,7 @@ describeBuilt('auto-commit lease CLI', () => {
     expect(wrongRelease.json.error).toContain('token does not match');
     expect(readFileSync(leasePath, 'utf-8')).toBe(beforeStatus);
 
-    execFileSync('git', ['reset'], { cwd: frameworkRoot, stdio: 'pipe' });
+    execFileSync('git', ['reset'], { cwd: join(frameworkRoot, 'orgs'), stdio: 'pipe' });
     const released = await run('alice', ['auto-commit-release', token]);
     expect(released.code).toBe(0);
     expect(released.json.status).toBe('released');
@@ -100,6 +117,7 @@ describeBuilt('auto-commit lease CLI', () => {
   });
 
   it('audits an expired-lease takeover with both owners and the prior expiry', async () => {
+    seedOrgsBaseline();
     const leasePath = join(ctxRoot, 'state', 'auto-commit-lease.json');
     mkdirSync(join(ctxRoot, 'state'), { recursive: true });
     writeFileSync(leasePath, JSON.stringify({
@@ -154,7 +172,7 @@ describeBuilt('auto-commit lease CLI', () => {
     expect(results.filter(result => result.json.lease?.status === 'held')).toHaveLength(1);
     expect(results.filter(result => result.json.lease?.status === 'contended')).toHaveLength(1);
 
-    execFileSync('git', ['reset'], { cwd: frameworkRoot, stdio: 'pipe' });
+    execFileSync('git', ['reset'], { cwd: join(frameworkRoot, 'orgs'), stdio: 'pipe' });
     const token = winner?.json.lease.token as string;
     const holder = winner?.json.lease.holder.agent as string;
     expect((await run(holder, ['auto-commit-release', token])).code).toBe(0);
@@ -169,7 +187,7 @@ describeBuilt('auto-commit lease CLI', () => {
 
     const alice = await run('alice', ['auto-commit']);
     const actualIndex = execFileSync('git', ['diff', '--cached', '--name-only'], {
-      cwd: frameworkRoot,
+      cwd: join(frameworkRoot, 'orgs'),
       encoding: 'utf-8',
     });
 
@@ -184,10 +202,11 @@ describeBuilt('auto-commit lease CLI', () => {
   });
 
   it('resets and does not commit when the pre-commit assertion is near expiry', async () => {
+    seedOrgsBaseline();
     const memoryPath = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', 'MEMORY.md');
     writeFileSync(memoryPath, 'near-expiry state');
     const beforeHead = execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: frameworkRoot,
+      cwd: join(frameworkRoot, 'orgs'),
       encoding: 'utf-8',
     }).trim();
     const staged = await run('alice', ['auto-commit']);
@@ -199,19 +218,19 @@ describeBuilt('auto-commit lease CLI', () => {
 
     const assertion = await run('alice', ['auto-commit-assert-held', token]);
     if (assertion.code !== 0) {
-      execFileSync('git', ['reset'], { cwd: frameworkRoot, stdio: 'pipe' });
+      execFileSync('git', ['reset'], { cwd: join(frameworkRoot, 'orgs'), stdio: 'pipe' });
     } else {
-      execFileSync('git', ['commit', '-m', 'must not happen'], { cwd: frameworkRoot });
+      execFileSync('git', ['commit', '-m', 'must not happen'], { cwd: join(frameworkRoot, 'orgs') });
     }
 
     expect(assertion.code).toBe(1);
     expect(assertion.json.error).toContain('at least 60000ms is required before commit');
     expect(execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: frameworkRoot,
+      cwd: join(frameworkRoot, 'orgs'),
       encoding: 'utf-8',
     }).trim()).toBe(beforeHead);
     expect(execFileSync('git', ['diff', '--cached', '--name-only'], {
-      cwd: frameworkRoot,
+      cwd: join(frameworkRoot, 'orgs'),
       encoding: 'utf-8',
     }).trim()).toBe('');
   });
@@ -224,7 +243,7 @@ describeBuilt('auto-commit lease CLI', () => {
     mkdirSync(eventsParent, { recursive: true });
     writeFileSync(join(eventsParent, 'events'), 'not a directory');
 
-    execFileSync('git', ['reset'], { cwd: frameworkRoot, stdio: 'pipe' });
+    execFileSync('git', ['reset'], { cwd: join(frameworkRoot, 'orgs'), stdio: 'pipe' });
     const released = await run('alice', ['auto-commit-release', token]);
 
     expect(released.code).toBe(0);

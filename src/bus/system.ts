@@ -125,11 +125,59 @@ function formatPathSample(paths: string[]): string {
   return `${paths.length} staged path${paths.length === 1 ? '' : 's'}: ${sample}`;
 }
 
+/**
+ * autoCommit's projectDir is the orgs/ local snapshot repo (see
+ * ensureOrgsGitRepo below), not the framework repo root -- so porcelain
+ * paths are already relative to orgs/, with no "orgs/" prefix to match.
+ */
 function isWithinAutoCommitScope(file: string, scope: AutoCommitScope): boolean {
-  const agentRoot = `orgs/${scope.org}/agents/${scope.agent}`;
+  const agentRoot = `${scope.org}/agents/${scope.agent}`;
   return file === `${agentRoot}/MEMORY.md`
     || file === `${agentRoot}/GOALS.md`
     || file === `${agentRoot}/config.json`;
+}
+
+// Default .gitignore for a fresh orgs/ local snapshot repo. Defense in
+// depth alongside autoCommit's own per-file allowlist above — secrets
+// should never even show up as untracked candidates in `git status`.
+const ORGS_REPO_GITIGNORE = `.env
+.env.*
+!.env.example
+secrets.env
+.cortextos-env
+*.log
+telegram-images/
+node_modules/
+__pycache__/
+`;
+
+/**
+ * Ensure a local-only git repo exists at orgsDir so autoCommit has
+ * something real to operate against there. No-ops if orgsDir doesn't
+ * exist yet, or already has its own .git (checked directly rather than
+ * via `git rev-parse`, which would otherwise walk up and find the
+ * framework repo's own .git and report a false positive).
+ *
+ * This repo is intentionally separate from the framework repo at
+ * CTX_PROJECT_ROOT — that repo is the public install repo and
+ * deliberately gitignores orgs/ (see its .gitignore comment, 2026-06-02
+ * PII-leak fast-follow). Agent state (MEMORY.md, GOALS.md, config.json)
+ * is real org data that must never land in that repo's history. This one
+ * gets no remote configured, ever — it must stay local-only, matching the
+ * "never pushes" contract in local-version-control's SKILL.md.
+ */
+export function ensureOrgsGitRepo(orgsDir: string): void {
+  if (!existsSync(orgsDir)) return;
+  if (existsSync(join(orgsDir, '.git'))) return;
+
+  execSync('git init', { cwd: orgsDir, stdio: 'pipe' });
+  execSync('git config user.email "cortextos-local@localhost"', { cwd: orgsDir, stdio: 'pipe' });
+  execSync('git config user.name "cortextOS Local Snapshot"', { cwd: orgsDir, stdio: 'pipe' });
+
+  const gitignorePath = join(orgsDir, '.gitignore');
+  if (!existsSync(gitignorePath)) {
+    writeFileSync(gitignorePath, ORGS_REPO_GITIGNORE, 'utf-8');
+  }
 }
 
 // --- Functions ---
@@ -235,6 +283,12 @@ export function autoCommit(
     };
   }
   acquiredLease = acquisition;
+
+  // Must run only while the lease is held: two callers racing to init the
+  // same fresh orgs/.git repo before either acquired the lease would race
+  // `git init` itself. Idempotent/no-op once the repo already exists.
+  ensureOrgsGitRepo(projectDir);
+
   if (acquisition.takeover && leaseContext.onTakeover) {
     try {
       leaseContext.onTakeover(acquisition.takeover);
