@@ -1252,8 +1252,23 @@ describe('FastChecker', () => {
   });
 
   describe('checkUsageTier — usage rate guard', () => {
+    const ORIGINAL_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+
     beforeEach(() => {
       vi.clearAllMocks();
+      // checkUsageTier requires a token source (accounts.json or this env
+      // var) before it will even attempt the check — most tests here are
+      // about tier-transition behavior once a source exists, not about the
+      // guard itself (see 'skips entirely when no token source configured').
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = 'test-token';
+    });
+
+    afterEach(() => {
+      if (ORIGINAL_OAUTH_TOKEN === undefined) {
+        delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      } else {
+        process.env.CLAUDE_CODE_OAUTH_TOKEN = ORIGINAL_OAUTH_TOKEN;
+      }
     });
 
     function createUsageChecker() {
@@ -1266,6 +1281,31 @@ describe('FastChecker', () => {
       (checker as any).usageLastCheckedAt = 0;
       return { checker, telegramApi };
     }
+
+    it('skips entirely when no token source is configured (no accounts.json, no env var)', async () => {
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      const { checker } = createUsageChecker();
+
+      await (checker as any).checkUsageTier();
+
+      expect(execFile).not.toHaveBeenCalled();
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('runs the check when accounts.json exists even without the env var', async () => {
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      mkdirSync(join(paths.stateDir, 'oauth'), { recursive: true });
+      writeFileSync(join(paths.stateDir, 'oauth', 'accounts.json'), '{}');
+      const { checker } = createUsageChecker();
+      vi.mocked(execFile).mockImplementation((_cmd, _args, _optsOrCb, maybeCb?) => { const callback = typeof _optsOrCb === 'function' ? _optsOrCb : maybeCb;
+        (callback as Function)(null, JSON.stringify({ five_hour: { utilization: 10 }, seven_day: { utilization: 0 } }));
+        return {} as any;
+      });
+
+      await (checker as any).checkUsageTier();
+
+      expect(execFile).toHaveBeenCalledTimes(1);
+    });
 
     it('TC-U1: transitions normal→high at 85%', async () => {
       const { checker, telegramApi } = createUsageChecker();
