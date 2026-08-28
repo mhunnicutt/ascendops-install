@@ -31,6 +31,7 @@ import { detectChatIdCommand } from './detect-chat-id.js';
 import { finalizeProcess } from './_finalize.js';
 import { updateCommand } from './update.js';
 import { supportAccessCommand } from './support-access.js';
+import { buzzCommand } from './buzz.js';
 
 const program = new Command();
 
@@ -71,6 +72,7 @@ program.addCommand(botCommand);
 program.addCommand(updateCommand);
 program.addCommand(detectChatIdCommand);
 program.addCommand(supportAccessCommand);
+program.addCommand(buzzCommand);
 
 // crash-alert: SessionEnd hook — cross-platform replacement for crash-alert.sh
 const crashAlertCommand = new Command('crash-alert')

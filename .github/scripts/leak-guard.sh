@@ -93,6 +93,20 @@ OPERATOR_USER_HASHES = {
     "9340b5cf49befaf0830f1e2522026800f5f1e5a7508291e8ff8a9d8306c923b6",
 }
 ALLOWED_LINE_HASHES = {
+    # Buzz member-release 2026-08-28: standard secp256k1/BIP340 TEST VECTORS
+    # (secret key = the integer 3 / 4, and the matching public key f9308a...) —
+    # universally-known, non-secret values the signature-verification tests
+    # require; the credential-assignment heuristic false-positives on the
+    # *_KEY / *_SECRET assignment. Exact-line hashes, so a real key elsewhere
+    # in the same file is still caught.
+    "tests/unit/buzz/event.test.ts": {
+        "c7544ad67d27f889ecf38c0e827d837679a894eed14ae7358bcfbb2e51a15d52",
+        "41d476690463110b2b6dfe457fe6a6f2aa15e2678ccca1867c8d6c25e3d336ab",
+    },
+    "tests/unit/buzz/manager-org-identity.test.ts": {
+        "51a3a772d2040ff43c5738b70ae7eda925746b2d87f4006a87125c6ba4ff06b2",
+        "7c9e52a69135ff90d55bebea6a2608473dab6e4ef39a293b1cd650eb7f98e414",
+    },
     # Synthetic operator-path fixtures. Exact-line hashes prevent broader
     # allowlisting from hiding a real path elsewhere in the same file.
     "tests/sprint7-environment.test.ts": {
