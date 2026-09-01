@@ -225,7 +225,8 @@ def get_genai_client(api_key):
     if factory_path:
         return _load_factory(factory_path)(api_key)
     from google import genai
-    return genai.Client(api_key=api_key)
+    from google.genai import types
+    return genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=10_000))
 
 
 def _retry_generate_content(client, *, model, contents, backoffs=(5, 15, 45)):
