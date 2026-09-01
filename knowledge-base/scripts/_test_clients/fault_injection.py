@@ -1,4 +1,5 @@
-"""Fault-injecting Gemini client for testing mmrag._retry_generate_content.
+"""Fault-injecting Gemini client for testing mmrag._retry_generate_content and
+mmrag._retry_embed_content.
 
 Wired via two env vars consumed by mmrag.get_genai_client:
 
@@ -8,7 +9,10 @@ Wired via two env vars consumed by mmrag.get_genai_client:
 The script is a comma-separated list of one entry per generate_content() call.
 Each entry is either "<code>" or "<code>:<message>". Code 200 returns a stub
 success response; any other code raises an APIError with the corresponding
-status name.
+status name. embed_content() calls are scripted separately via the
+FaultInjectionClient(script, embed_script=...) constructor argument — tests
+that target _retry_embed_content directly (not make_client) pass embed_script
+in instead of going through the env var.
 
 Code -> status mapping (set is intentionally narrow — covers what the retry
 loop predicate distinguishes between transient and non-transient):
@@ -56,10 +60,22 @@ class _StubResponse:
         self.usage_metadata = None
 
 
+class _StubEmbedding:
+    def __init__(self, values):
+        self.values = values
+
+
+class _StubEmbedResponse:
+    def __init__(self, values):
+        self.embeddings = [_StubEmbedding(values)]
+
+
 class _StubModels:
-    def __init__(self, script):
+    def __init__(self, script, embed_script=None):
         self._script = list(script)
         self._index = 0
+        self._embed_script = list(embed_script) if embed_script is not None else []
+        self._embed_index = 0
 
     def generate_content(self, model=None, contents=None, **kwargs):
         if self._index >= len(self._script):
@@ -74,16 +90,23 @@ class _StubModels:
         status = _STATUS_FOR_CODE.get(code, "UNKNOWN")
         raise _InjectedAPIError(code, status, message or f"injected {code} {status}")
 
-    def embed_content(self, *a, **kw):
-        raise RuntimeError(
-            "fault_injection: embed_content is not scripted. Tests should target "
-            "_retry_generate_content directly, not the full ingest_pdf pipeline."
-        )
+    def embed_content(self, model=None, contents=None, config=None, **kwargs):
+        if self._embed_index >= len(self._embed_script):
+            raise RuntimeError(
+                f"fault_injection: embed script exhausted at attempt {self._embed_index + 1} "
+                f"(scripted {len(self._embed_script)} responses)"
+            )
+        code, message = self._embed_script[self._embed_index]
+        self._embed_index += 1
+        if code == 200:
+            return _StubEmbedResponse([0.0])
+        status = _STATUS_FOR_CODE.get(code, "UNKNOWN")
+        raise _InjectedAPIError(code, status, message or f"injected {code} {status}")
 
 
 class FaultInjectionClient:
-    def __init__(self, script):
-        self.models = _StubModels(script)
+    def __init__(self, script, embed_script=None):
+        self.models = _StubModels(script, embed_script=embed_script)
 
 
 def _parse_script(spec):

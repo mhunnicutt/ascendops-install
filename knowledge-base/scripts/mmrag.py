@@ -257,10 +257,37 @@ def _retry_generate_content(client, *, model, contents, backoffs=(5, 15, 45)):
     raise last_err if last_err else RuntimeError("retry loop completed without response or error")
 
 
+def _retry_embed_content(client, *, model, contents, config, backoffs=(5, 15, 45)):
+    """Call client.models.embed_content with bounded retries on transient APIErrors.
+
+    Mirrors _retry_generate_content's retry classification (HTTP 429/500/503,
+    status UNAVAILABLE/RESOURCE_EXHAUSTED retry with backoff; anything else
+    re-raises immediately). embed_content previously had no retry at all, so a
+    single transient error failed the whole chunk.
+    """
+    from google.genai import errors as _genai_errors
+    last_err = None
+    for attempt, backoff in enumerate(backoffs, start=1):
+        try:
+            return client.models.embed_content(model=model, contents=contents, config=config)
+        except _genai_errors.APIError as e:
+            last_err = e
+            is_transient = (e.code in TRANSIENT_HTTP_CODES) or (e.status in TRANSIENT_STATUS_NAMES)
+            if not is_transient:
+                raise
+            if attempt < len(backoffs):
+                print(f"    Transient error (HTTP {e.code} {e.status or ''}); retrying in {backoff}s (attempt {attempt}/{len(backoffs)})")
+                time.sleep(backoff)
+            else:
+                print(f"    Exhausted retries on transient error: HTTP {e.code} {e.status or ''}")
+    raise last_err if last_err else RuntimeError("retry loop completed without response or error")
+
+
 def embed_content(client, config, content, task_type="RETRIEVAL_DOCUMENT"):
     """Embed content using Gemini Embedding 2. Content can be text string or list of Parts."""
     from google.genai import types
-    result = client.models.embed_content(
+    result = _retry_embed_content(
+        client,
         model=config.get("embedding_model", "gemini-embedding-2-preview"),
         contents=content,
         config=types.EmbedContentConfig(
