@@ -11,6 +11,10 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+const loaderMocks = vi.hoisted(() => ({ prepareNodePtySpawn: vi.fn() }));
+
+vi.mock('../../../src/pty/node-pty-loader.js', () => loaderMocks);
+
 // Hermetic fs: skip secrets.env / agent .env loading.
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
@@ -104,6 +108,7 @@ beforeEach(() => {
   preflightMocks.ensureFolderTrusted.mockReturnValue(true);
   preflightMocks.ensureBypassPromptSuppressed.mockReturnValue(true);
   preflightMocks.readUnattendedConsent.mockReset().mockReturnValue(undefined);
+  loaderMocks.prepareNodePtySpawn.mockReset().mockImplementation((cached) => cached);
 });
 
 afterEach(() => {
@@ -277,6 +282,18 @@ describe('AgentPTY trust-prompt auto-accept', () => {
     expect(handle.fake.onData).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledTimes(2);
     warn.mockRestore();
+  });
+
+  it('routes a production spawn through prepareNodePtySpawn', async () => {
+    const handle = makeFakePty();
+    const preparedSpawn = vi.fn(() => handle.fake);
+    loaderMocks.prepareNodePtySpawn.mockReturnValue(preparedSpawn);
+    const pty = new AgentPTY(TEST_ENV, { vendor: 'anthropic' });
+
+    await pty.spawn('fresh', 'hello');
+
+    expect(loaderMocks.prepareNodePtySpawn).toHaveBeenCalledWith(null);
+    expect(preparedSpawn).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a whitespace-only configured working directory', async () => {
