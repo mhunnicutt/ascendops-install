@@ -11,6 +11,7 @@ vi.mock('../../../src/slack/api.js', () => ({
     getHistory: vi.fn(),
     getUserName: vi.fn().mockResolvedValue('Test User'),
     getUserInfo: vi.fn().mockResolvedValue({ handle: null, displayName: 'Test User' }),
+    getAuthIdentity: vi.fn().mockResolvedValue(null),
     postMessage: vi.fn(),
     };
   }),
