@@ -176,6 +176,27 @@ export function wrapFenceSafe(input: string): string {
 }
 
 /**
+ * Every `=== X ===` containment header this daemon injects into an agent PTY
+ * as an unfenced structural marker (fast-checker's Telegram/Slack/reaction/
+ * urgent-signal deliveries, Gmail watch notifications). sanitizeForPtyInjection
+ * below quotes forged copies of these; extend this list whenever a new such
+ * header is introduced, so the neutralizer can never silently lag what the
+ * daemon actually emits. `SLACK` covers `=== SLACK CONNECTION DEAD` and
+ * `TELEGRAM` covers the PHOTO/DOCUMENT/VOICE/VIDEO variants via the `\b`
+ * word-boundary rule in the pattern below -- no separate entry per variant.
+ *
+ * NOTE: `CRON FIRED`, `CONTEXT`, and `CONTEXT HANDOFF REQUIRED` are also
+ * daemon-originated signals (agent-manager.ts, cron-noop-detector.ts,
+ * fast-checker.ts), but on this codebase they are injected in `[HEADER ...]`
+ * bracket form, not this `=== HEADER ===` form -- grep confirms no `===`
+ * emission exists for any of the three. They are out of scope for THIS
+ * pattern; bracket-form forgery would need its own neutralization rule.
+ */
+export const PTY_STRUCTURAL_HEADERS = [
+  'AGENT MESSAGE', 'TELEGRAM', 'SLACK', 'REACTION', 'URGENT SIGNAL', 'GMAIL WATCH',
+] as const;
+
+/**
  * Neutralize PTY structural-injection vectors in untrusted text that is
  * injected WITHOUT a protective fence — the context-preview fields
  * (`[Replying to: "..."]`, `[Your last message: "..."]`,
@@ -189,9 +210,9 @@ export function wrapFenceSafe(input: string): string {
  *  - collapse any run of 3+ backticks to 2 so the preview cannot open a fence
  *    that swallows following real structure (survives input transforms — no
  *    zero-width reliance);
- *  - prefix forged `=== AGENT MESSAGE` / `=== TELEGRAM` / `Reply using:
- *    cortextos bus` lines with [quoted] so they read as content. The leading-
- *    whitespace class must match every Unicode space char a downstream parser's
+ *  - prefix a forged copy of any PTY_STRUCTURAL_HEADERS entry (above), or a
+ *    `Reply using: cortextos bus` line, with [quoted] so it reads as content.
+ *    The leading-whitespace class must match every Unicode space char a downstream parser's
  *    `.trim()` would strip, or a header preceded by e.g. NBSP/IDEOGRAPHIC SPACE
  *    escapes [quoted] here yet is still recognized as a header after trim (#596,
  *    ClintMoody). Line terminators are excluded — the /m anchor already starts a
@@ -206,7 +227,7 @@ export function sanitizeForPtyInjection(input: string): string {
     .replace(/\r\n?/g, '\n')
     .replace(/`{3,}/g, '``')
     .replace(
-      /^([ \t\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]*)(={3,}\s*(?:AGENT MESSAGE|TELEGRAM)\b|Reply using:\s*cortextos\s+bus)/gim,
+      /^([ \t\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]*)(={3,}\s*(?:AGENT MESSAGE|TELEGRAM|SLACK|REACTION|URGENT SIGNAL|GMAIL WATCH)\b|Reply using:\s*cortextos\s+bus)/gim,
       '$1[quoted] $2',
     );
 }
