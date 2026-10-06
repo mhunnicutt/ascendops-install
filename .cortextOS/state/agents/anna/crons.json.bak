@@ -1,0 +1,13 @@
+{
+  "updated_at": "2026-08-25T13:24:02.751Z",
+  "crons": [
+    {
+      "name": "appfolio-daily-health",
+      "prompt": "Run the daily AppFolio pipeline health check. Load /home/ascend/.config/foothills/appfolio-health.env without printing its contents. Call APPFOLIO_HEALTH_URL using the x-appfolio-health-secret header from APPFOLIO_HEALTH_SECRET. Check only the summary and each report display_name, health_status, and delivery_status. Never expose secrets or resident, owner, property, vendor, financial, CSV, or raw database data. If attentionRequired is zero, post one concise activity update confirming how many expected reports are healthy. If attentionRequired is greater than zero or the request fails, notify master with only the affected report names and statuses and log a warning event. Do not write to Supabase, Gmail, or AppFolio.",
+      "schedule": "15 13 * * *",
+      "enabled": true,
+      "created_at": "2026-08-25T13:24:02.748Z",
+      "description": "Daily read-only verification of all expected AppFolio report deliveries and imports"
+    }
+  ]
+}

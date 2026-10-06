@@ -1,0 +1,79 @@
+{
+  "updated_at": "2026-08-25T13:36:43.871Z",
+  "crons": [
+    {
+      "name": "heartbeat",
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on your highest priority task.",
+      "schedule": "4h",
+      "enabled": true,
+      "created_at": "2026-08-25T13:36:43.871Z",
+      "metadata": {
+        "migrated_from_config": true,
+        "original_type": "recurring"
+      }
+    },
+    {
+      "name": "nightly-metrics",
+      "prompt": "Run nightly metrics collection: cortextos bus collect-metrics. Review the output and report any anomalies via Telegram to the orchestrator.",
+      "schedule": "24h",
+      "enabled": true,
+      "created_at": "2026-08-25T13:36:43.871Z",
+      "metadata": {
+        "migrated_from_config": true,
+        "original_type": "recurring"
+      }
+    },
+    {
+      "name": "auto-commit",
+      "prompt": "Read .claude/skills/local-version-control/SKILL.md and execute the daily version control workflow. Stage, review, and commit changes.",
+      "schedule": "24h",
+      "enabled": true,
+      "created_at": "2026-08-25T13:36:43.871Z",
+      "metadata": {
+        "migrated_from_config": true,
+        "original_type": "recurring"
+      }
+    },
+    {
+      "name": "check-upstream",
+      "prompt": "Read .claude/skills/upstream-sync/SKILL.md and execute the upstream sync workflow. Check for framework updates and report to the orchestrator.",
+      "schedule": "24h",
+      "enabled": true,
+      "created_at": "2026-08-25T13:36:43.871Z",
+      "metadata": {
+        "migrated_from_config": true,
+        "original_type": "recurring"
+      }
+    },
+    {
+      "name": "catalog-browse",
+      "prompt": "Read .claude/skills/catalog-browse/SKILL.md and execute the catalog browse workflow. Check for new community skills and recommend useful ones.",
+      "schedule": "7d",
+      "enabled": true,
+      "created_at": "2026-08-25T13:36:43.871Z",
+      "metadata": {
+        "migrated_from_config": true,
+        "original_type": "recurring"
+      }
+    },
+    {
+      "name": "daily-restart",
+      "prompt": "Daily scheduled hard restart for RAM management. Run: node /home/ascend/ascendops/dist/cli.js bus hard-restart --reason 'Daily 08:00 UTC hard refresh -- history reload causes RAM accumulation'",
+      "schedule": "0 8 * * *",
+      "enabled": true,
+      "created_at": "2026-08-25T13:36:43.871Z",
+      "metadata": {
+        "migrated_from_config": true,
+        "original_type": "recurring"
+      }
+    },
+    {
+      "name": "appfolio-daily-health",
+      "prompt": "Run the daily AppFolio pipeline health check. Load /home/ascend/.config/foothills/appfolio-health.env without printing its contents. Call APPFOLIO_HEALTH_URL using the x-appfolio-health-secret header from APPFOLIO_HEALTH_SECRET. Check only the summary and each report display_name, health_status, and delivery_status. Never expose secrets or resident, owner, property, vendor, financial, CSV, or raw database data. If attentionRequired is zero, post one concise activity update confirming how many expected reports are healthy. If attentionRequired is greater than zero or the request fails, notify master with only the affected report names and statuses and log a warning event. Do not write to Supabase, Gmail, or AppFolio.",
+      "schedule": "15 13 * * *",
+      "enabled": true,
+      "created_at": "2026-08-25T13:24:02.748Z",
+      "description": "Daily read-only verification of all expected AppFolio report deliveries and imports"
+    }
+  ]
+}
