@@ -3,6 +3,12 @@ import { homedir } from 'os';
 import { join } from 'path';
 import type { AgentConfig, AgentStatus, CronExecutionLogEntry, CronFireKind } from '../types/index.js';
 import { resolveClaudeProjectDir } from '../utils/claude-project-dir.js';
+import {
+  createDaemonStructuralHeader,
+  structuralDaemonInjection,
+  rawDaemonBody,
+  type DaemonInjection,
+} from '../utils/validate.js';
 
 export const CRON_NOOP_VERIFY_DELAY_MS = 75_000;
 export interface CronTranscriptLookup {
@@ -15,8 +21,14 @@ interface CronSaltCandidate {
   firedAt: string;
 }
 
+// Must stay byte-identical to what the real scheduler fire renders
+// (agent-manager.ts buildCronInjection -> structuralDaemonInjection ->
+// createDaemonStructuralHeader). Delegating directly, rather than hand-
+// formatting a parallel string, is what keeps the two from drifting apart
+// the way they did (2026-10-09 incident: verifier searched for a marker
+// real fires never produced, reinjecting on every unconfirmed fire).
 export function cronFireSalt(firedAt: string, cronName: string): string {
-  return `[CRON FIRED ${firedAt}] ${cronName}:`;
+  return createDaemonStructuralHeader('CRON FIRED', `${firedAt} ${cronName}`);
 }
 
 export function resolveClaudeTranscriptPath(
@@ -128,7 +140,7 @@ export interface CronNoopDetectorOptions {
   appendExecutionLog: (agentName: string, entry: CronExecutionLogEntry) => void;
   emitEvent: (agentName: string, event: string, severity: 'info' | 'warning' | 'error', meta: Record<string, unknown>) => void;
   getStatus: (agentName: string) => AgentStatus | null;
-  inject: (agentName: string, text: string) => InjectResult;
+  inject: (agentName: string, text: string | DaemonInjection) => InjectResult;
   notifyOrchestrator: (agentName: string, text: string) => void;
   hasActivitySince?: (agentName: string, firedAt: string) => boolean;
   logger?: (msg: string) => void;
@@ -315,7 +327,15 @@ export class CronNoopDetector {
 
     const firedAt = this.now().toISOString();
     const salt = cronFireSalt(firedAt, pending.cronName);
-    const injection = `[CRON FIRED ${firedAt}] ${pending.cronName}: ${pending.prompt}`;
+    // Same structural path the real scheduler fire uses -- a reinjected fire
+    // is then indistinguishable from an original one to the agent, and this
+    // salt stays anchored to the one real emission path instead of a second,
+    // driftable copy.
+    const injection = structuralDaemonInjection(
+      'CRON FIRED',
+      `${firedAt} ${pending.cronName}`,
+      rawDaemonBody(pending.prompt),
+    );
     const result = this.inject(pending.agentName, injection);
     if (!result.ok) {
       this.escalatePersistent(pending, null, result.message);

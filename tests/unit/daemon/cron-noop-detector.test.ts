@@ -8,6 +8,12 @@ import {
   resolveClaudeTranscriptPath,
   transcriptContainsCronTurn,
 } from '../../../src/daemon/cron-noop-detector.js';
+import {
+  structuralDaemonInjection,
+  rawDaemonBody,
+  renderDaemonInjection,
+  type DaemonInjection,
+} from '../../../src/utils/validate.js';
 import type { AgentConfig, CronExecutionLogEntry } from '../../../src/types/index.js';
 
 function transcriptLine(timestamp: string, content: unknown): string {
@@ -93,10 +99,13 @@ describe('cron-noop-detector transcript lookup', () => {
 
   it('keeps the salt aligned with the injected cron delimiter', () => {
     const firedAt = '2026-06-17T12:00:00.000Z';
-
-    expect(`[CRON FIRED ${firedAt}] heartbeat: Read HEARTBEAT.md`).toContain(
-      cronFireSalt(firedAt, 'heartbeat'),
+    // Build the injection via the same path the real scheduler fire and reinject() both use,
+    // then assert cronFireSalt is a substring -- so this is a regression test against the
+    // actual render path, not a second hand-formatted string that can silently drift.
+    const rendered = renderDaemonInjection(
+      structuralDaemonInjection('CRON FIRED', `${firedAt} heartbeat`, rawDaemonBody('Read HEARTBEAT.md')),
     );
+    expect(rendered).toContain(cronFireSalt(firedAt, 'heartbeat'));
   });
 
   it('finds salted cron turns even when verbose output pushes them beyond the old tail window', () => {
@@ -126,7 +135,7 @@ describe('CronNoopDetector', () => {
   let logs: CronExecutionLogEntry[];
   let events: Array<{ event: string; severity: string; meta: Record<string, unknown> }>;
   let notifications: string[];
-  let injects: string[];
+  let injects: Array<string | DaemonInjection>;
   let transcriptPath: string | null;
   let status: 'running' | 'starting';
   let hasActivitySince: ReturnType<typeof vi.fn>;
@@ -291,8 +300,9 @@ describe('CronNoopDetector', () => {
     await vi.advanceTimersByTimeAsync(verifyDelayMs);
 
     expect(injects).toHaveLength(1);
-    expect(injects[0]).toContain('[CRON FIRED 2026-06-17T12:00:02.000Z] heartbeat');
-    expect(injects[0]).not.toContain(originalSalt);
+    const rendered = renderDaemonInjection(injects[0] as DaemonInjection);
+    expect(rendered).toContain('CRON FIRED 2026-06-17T12:00:02.000Z heartbeat');
+    expect(rendered).not.toContain(originalSalt);
   });
 
   it('accepts a delayed original salt after a re-inject instead of escalating', async () => {

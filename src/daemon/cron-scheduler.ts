@@ -492,10 +492,15 @@ export class CronScheduler {
       }
 
       if (isReload && existing !== undefined && existing.changeKey === key) {
-        // Definition unchanged — preserve nextFireAt.
-        // Safe to copy: the guard above proved no fire is in flight, so nothing
-        // holds a reference to the entry we are replacing.
-        nextScheduled.set(def.name, { ...existing, definition: def });
+        // Definition unchanged — preserve nextFireAt AND object identity. Do not
+        // clone: a concurrent tick() can already hold its own reference to this
+        // exact entry even though THIS entry was never firing -- a different
+        // entry's fire is what bumped crons.json's mtime and triggered this
+        // reload. Cloning hands that other invocation a stale object whose
+        // firing flag starts false again, letting it double-fire later in its
+        // loop.
+        existing.definition = def;
+        nextScheduled.set(def.name, existing);
         continue;
       }
 
@@ -669,6 +674,7 @@ export class CronScheduler {
       try {
         updateCron(this.agentName, name, { last_fire_attempted_at: attemptIso });
         sc.definition = { ...cron, last_fire_attempted_at: attemptIso };
+        this.lastLoadedCronsMtimeMs = cronsFileMtimeMs(this.agentName);
       } catch (err) {
         this.logger(
           `[cron-scheduler] WARNING: failed to persist last_fire_attempted_at for "${name}" — ` +
@@ -690,6 +696,7 @@ export class CronScheduler {
             last_fired_at: attemptIso,
             fire_count: newFireCount,
           });
+          this.lastLoadedCronsMtimeMs = cronsFileMtimeMs(this.agentName);
         } catch (err) {
           this.logger(
             `[cron-scheduler] WARNING: failed to persist fire state for "${name}" — ` +
