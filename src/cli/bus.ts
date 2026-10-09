@@ -21,6 +21,8 @@ import {
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, checkUpstreamAsOwner, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
+import { runCheckoutUpdate } from './update.js';
+import { resolveMemberCheckout } from './member-checkout.js';
 import { createApproval, updateApproval } from '../bus/approval.js';
 import { listActiveThreads, addActiveThread, updateActiveThread, removeActiveThread, clearActiveThreads } from '../bus/active-threads.js';
 import { listVendorDocPatterns, vendorDocPattern } from '../bus/vendor-patterns.js';
@@ -1597,9 +1599,27 @@ busCommand
   .option('--apply', 'Merge upstream changes (requires user approval)')
   .option('--owner-only', 'Require this agent to own the shared canonical upstream check')
   .option('--cron-invocation', 'Return a clean skip for a non-owner cron (manual non-owner runs fail)')
-  .action((opts: { apply?: boolean; ownerOnly?: boolean; cronInvocation?: boolean }) => {
+  .action(async (opts: { apply?: boolean; ownerOnly?: boolean; cronInvocation?: boolean }, command: Command) => {
+    const memberMode = command.parent?.parent?.name() === 'ascendops';
+    if (memberMode && opts.apply) {
+      if (opts.ownerOnly) {
+        const env = resolveEnv();
+        const ownership = checkUpstreamAsOwner(resolveMemberCheckout(), {
+          ctxRoot: env.ctxRoot, org: env.org, agentName: env.agentName,
+          orchestrator: env.orchestrator ?? '', invocation: opts.cronInvocation ? 'cron' : 'manual',
+        }, {}, () => ({ status: 'up_to_date' }));
+        if (ownership.status !== 'up_to_date') { emitResult(ownership); return; }
+      }
+      if (process.env.CORTEXTOS_CONFIRM_UPSTREAM_MERGE !== 'yes') {
+        emitResult({ status: 'error', error: 'Member apply requires CORTEXTOS_CONFIRM_UPSTREAM_MERGE=yes' });
+        return;
+      }
+      const result = await runCheckoutUpdate({ yes: true, structured: true }, true, resolveMemberCheckout());
+      emitResult(result);
+      return;
+    }
     const env = resolveEnv();
-    const frameworkRoot = env.frameworkRoot || env.projectRoot || process.cwd();
+    const frameworkRoot = memberMode ? resolveMemberCheckout() : env.frameworkRoot || env.projectRoot || process.cwd();
     const result = opts.ownerOnly
       ? checkUpstreamAsOwner(frameworkRoot, {
           ctxRoot: env.ctxRoot,
@@ -2735,14 +2755,23 @@ activeThreadsCommand
 
 busCommand.addCommand(activeThreadsCommand);
 
+function vendorPatternsConfigPath(configOverride?: string): string | undefined {
+  if (configOverride) return configOverride;
+  const { env, paths } = resolveAgentBusPaths();
+  if (!env.org) return undefined;
+  if (!/^[a-zA-Z0-9_-]+$/.test(env.org)) throw new Error('Invalid organization name');
+  return join(dirname(paths.taskDir), 'vendor-doc-patterns.json');
+}
+
 const vendorPatternsCommand = new Command('vendor-patterns')
   .description('Look up vendor-specific documentation and closeout behavior');
 
 vendorPatternsCommand
   .command('list')
   .option('--format <fmt>', 'Output format: json or table', 'table')
-  .action((opts: { format?: string }) => {
-    const patterns = listVendorDocPatterns();
+  .option('--config <path>', 'Member vendor-doc-patterns JSON; defaults to the current organization')
+  .action((opts: { format?: string; config?: string }) => {
+    const patterns = listVendorDocPatterns(vendorPatternsConfigPath(opts.config));
 
     if (opts.format === 'json') {
       console.log(JSON.stringify(patterns, null, 2));
@@ -2769,8 +2798,9 @@ vendorPatternsCommand
   .command('lookup')
   .argument('<vendor_name>', 'Vendor name or alias')
   .option('--json', 'Emit raw JSON instead of formatted text')
-  .action((vendorName: string, opts: { json?: boolean }) => {
-    const pattern = vendorDocPattern(vendorName);
+  .option('--config <path>', 'Member vendor-doc-patterns JSON; defaults to the current organization')
+  .action((vendorName: string, opts: { json?: boolean; config?: string }) => {
+    const pattern = vendorDocPattern(vendorName, vendorPatternsConfigPath(opts.config));
     if (!pattern) {
       const payload = { error: `no pattern for ${vendorName}` };
       console.error(JSON.stringify(payload));
