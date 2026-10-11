@@ -721,7 +721,9 @@ console.log('');
 console.log(`${G}${BOLD}AscendOps installed successfully!${R}`);
 console.log('');
 
-const onboardingLaunchCommand = `cd ${JSON.stringify(INSTALL_DIR)} && claude /onboarding`;
+const onboardingLaunchCommand = IS_WINDOWS
+  ? `Set-Location -LiteralPath '${INSTALL_DIR.replace(/['\u2018\u2019\u201A\u201B]/g, c => c + c)}'\nclaude /onboarding`
+  : `cd ${JSON.stringify(INSTALL_DIR)} && claude /onboarding`;
 
 if (!commandExists('claude')) {
   console.log(`${Y}  IMPORTANT: Install and authenticate Claude Code before continuing:${R}`);
@@ -730,7 +732,7 @@ if (!commandExists('claude')) {
   console.log('');
 }
 
-console.log(`${BOLD}Next step — copy-paste this single command:${R}`);
+console.log(`${BOLD}Next step — copy-paste ${IS_WINDOWS ? 'these two commands in order in PowerShell' : 'this single command'}:${R}`);
 console.log('');
 console.log(`  ${Y}${onboardingLaunchCommand}${R}`);
 console.log('');
