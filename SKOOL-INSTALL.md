@@ -113,6 +113,26 @@ The installer:
 When it finishes you'll see **"AscendOps installed successfully!"** and a
 copy-paste command to launch onboarding.
 
+**One last question.** Near the end, when you run it in a normal terminal window,
+the installer asks:
+
+```
+Enable unattended Bypass Permissions mode? [y/N]
+```
+
+Answer y (Yes). This lets your agents run on their own without stopping for a
+click on each step. With No, an agent running 24/7 can sit waiting for an approval
+nobody sees.
+
+If you answered No by mistake, switch it on later:
+
+1. In `~/ascendops`, run `node installer/consent-gate.mjs --grant`. Agents you
+   create after this start in unattended mode.
+2. Agents you already created keep their own setting. For each one, open
+   `~/ascendops/orgs/<your-org>/agents/<agent-name>/config.json`, change
+   `"dangerously_skip_permissions": false` to `true`, save, then run
+   `ascendops restart <agent-name>`.
+
 ## Step 1.4 — Open the installed folder in Claude Code
 
 The installer prints this exact command — run it:
@@ -287,24 +307,40 @@ you through workspace + app creation, OAuth scopes, token paste, and channel pic
 
 # How updates and improvements flow
 
-Check which path you're on:
+**Get our updates** (fork or plain clone, same commands). Run them one at a time:
+
+```bash
+ascendops update
+pm2 restart cortextos-daemon
+ascendops restart <agent-name>
+```
+
+`ascendops update` shows what changed and asks before applying. Only after it
+reports "Updates applied, dependencies installed, and runtime rebuilt", restart
+the daemon once, then run `ascendops restart <agent-name>` for each agent. If the
+update fails it prints a recovery command (`ascendops update --rebuild`); do not
+restart agents until that succeeds. Details: [MEMBER-UPDATES.md](MEMBER-UPDATES.md).
+
+**Installed before the updater existed?** If `ascendops update` is not a known
+command, your checkout needs a one-time manual rebuild before the updater is
+available. Ask in the Skool community for the steps.
+
+**Send your improvements back.** Check which path you're on:
 
 ```bash
 cd ~/ascendops && git remote -v
 ```
 
 - **You see both `origin` (your fork) and `upstream` (noogalabs/ascendops):** the
-  installer forked for you. Two-way flow:
-  - Pull our updates: `git pull upstream main`
-  - Send yours back:
-    ```bash
-    git checkout -b feat/my-improvement
-    # edits...
-    git push origin feat/my-improvement
-    gh pr create --repo noogalabs/ascendops --base main
-    ```
-- **You see only `upstream`:** plain-clone (pull-only) — `gh` wasn't authed at
-  install. Pull updates with `git pull upstream main`. To enable contributing back:
+  installer forked for you. Send yours back:
+  ```bash
+  git checkout -b feat/my-improvement
+  # edits...
+  git push origin feat/my-improvement
+  gh pr create --repo noogalabs/ascendops --base main
+  ```
+- **You see only `upstream`:** plain-clone (pull-only), because `gh` wasn't authed
+  at install. To enable contributing back:
   ```bash
   cd ~/ascendops
   gh auth login            # if you haven't
