@@ -407,6 +407,165 @@ describe('createApproval — agent-bot Telegram ping (closes 50h+ Repo-B-style s
   });
 });
 
+describe('createApproval — pre-auth-limit filter (signoff_required)', () => {
+  const originalFetch = global.fetch;
+  const envKeys = ['APPFOLIO_CLIENT_ID', 'APPFOLIO_CLIENT_SECRET', 'APPFOLIO_BASE_URL'] as const;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of envKeys) {
+      savedEnv[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    for (const k of envKeys) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  function mockPropertyDirectory(rows: Array<{ PropertyId: number; MaintenanceLimit: string }>): void {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: rows }),
+    }) as unknown as typeof fetch;
+  }
+
+  it('does nothing (no lookup, no new fields) when cost/propertyId are not passed', async () => {
+    global.fetch = vi.fn() as unknown as typeof fetch;
+    const id = await createApproval(paths, 'maintenance', 'TestOrg', 'Approve WO#1 -- $50 (1 Main St)', 'financial', 'ctx', frameworkRoot);
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.status).toBe('pending');
+    expect(approval.cost).toBeUndefined();
+    expect(approval.signoff_required).toBeUndefined();
+  });
+
+  it('auto-resolves to approved/resolved when cost <= property MaintenanceLimit', async () => {
+    process.env.APPFOLIO_CLIENT_ID = 'cid';
+    process.env.APPFOLIO_CLIENT_SECRET = 'csecret';
+    process.env.APPFOLIO_BASE_URL = 'https://example.appfolio.com';
+    mockPropertyDirectory([{ PropertyId: 971, MaintenanceLimit: '250.00' }]);
+
+    const id = await createApproval(
+      paths, 'maintenance', 'TestOrg', 'Approve WO#1 -- $150 (100 A Heatherbrook Ct)', 'financial', 'ctx',
+      frameworkRoot, undefined, 150, 971,
+    );
+
+    // Never enters pending/ — auto-resolved straight to resolved/.
+    expect(existsSync(join(paths.approvalDir, 'pending', `${id}.json`))).toBe(false);
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'resolved', `${id}.json`), 'utf-8'));
+    expect(approval.status).toBe('approved');
+    expect(approval.cost).toBe(150);
+    expect(approval.property_id).toBe(971);
+    expect(approval.maintenance_limit).toBe(250);
+    expect(approval.signoff_required).toBe(false);
+    expect(approval.resolved_by).toMatch(/pre-auth-limit/);
+
+    // No Telegram/activity-channel noise for an auto-resolved item.
+    expect(postActivitySpy).not.toHaveBeenCalled();
+    expect(telegramSendMessageSpy).not.toHaveBeenCalled();
+  });
+
+  it('stays pending with signoff_required=true when cost > property MaintenanceLimit', async () => {
+    process.env.APPFOLIO_CLIENT_ID = 'cid';
+    process.env.APPFOLIO_CLIENT_SECRET = 'csecret';
+    process.env.APPFOLIO_BASE_URL = 'https://example.appfolio.com';
+    mockPropertyDirectory([{ PropertyId: 971, MaintenanceLimit: '250.00' }]);
+
+    const id = await createApproval(
+      paths, 'maintenance', 'TestOrg', 'Approve WO#2 -- $900 (100 A Heatherbrook Ct)', 'financial', 'ctx',
+      frameworkRoot, undefined, 900, 971,
+    );
+
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.status).toBe('pending');
+    expect(approval.cost).toBe(900);
+    expect(approval.maintenance_limit).toBe(250);
+    expect(approval.signoff_required).toBe(true);
+    // Still goes through the normal fan-out — this one needs a human.
+    expect(postActivitySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to normal pending behavior (no crash) when AppFolio credentials are missing', async () => {
+    // envKeys already cleared in beforeEach.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const id = await createApproval(
+      paths, 'maintenance', 'TestOrg', 'Approve WO#3 -- $900 (unknown)', 'financial', 'ctx',
+      frameworkRoot, undefined, 900, 971,
+    );
+
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.status).toBe('pending');
+    expect(approval.signoff_required).toBeUndefined();
+    expect(approval.maintenance_limit).toBeUndefined();
+    const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+    expect(warnCalls.some((w) => w.includes('No AppFolio credentials'))).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it('falls back to normal pending behavior when the property is not found in the report', async () => {
+    process.env.APPFOLIO_CLIENT_ID = 'cid';
+    process.env.APPFOLIO_CLIENT_SECRET = 'csecret';
+    process.env.APPFOLIO_BASE_URL = 'https://example.appfolio.com';
+    mockPropertyDirectory([{ PropertyId: 1, MaintenanceLimit: '250.00' }]); // 971 absent
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const id = await createApproval(
+      paths, 'maintenance', 'TestOrg', 'Approve WO#4 -- $50 (unknown property)', 'financial', 'ctx',
+      frameworkRoot, undefined, 50, 971,
+    );
+
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.status).toBe('pending');
+    expect(approval.signoff_required).toBeUndefined();
+    const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+    expect(warnCalls.some((w) => w.includes('Could not resolve MaintenanceLimit'))).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it('falls back to normal pending behavior when the AppFolio fetch rejects (network error)', async () => {
+    process.env.APPFOLIO_CLIENT_ID = 'cid';
+    process.env.APPFOLIO_CLIENT_SECRET = 'csecret';
+    process.env.APPFOLIO_BASE_URL = 'https://example.appfolio.com';
+    global.fetch = vi.fn().mockRejectedValue(new Error('network down')) as unknown as typeof fetch;
+
+    const id = await createApproval(
+      paths, 'maintenance', 'TestOrg', 'Approve WO#5 -- $50 (network down)', 'financial', 'ctx',
+      frameworkRoot, undefined, 50, 971,
+    );
+
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.status).toBe('pending');
+    expect(approval.signoff_required).toBeUndefined();
+  });
+
+  it('falls back to org-level secrets.env when agentDir/.env lacks AppFolio credentials (load-bearing: maintenance agent has no AppFolio REST creds of its own)', async () => {
+    const orgSecretsDir = join(frameworkRoot, 'orgs', 'TestOrg');
+    mkdirSync(orgSecretsDir, { recursive: true });
+    writeFileSync(
+      join(orgSecretsDir, 'secrets.env'),
+      'APPFOLIO_CLIENT_ID=org-cid\nAPPFOLIO_CLIENT_SECRET=org-secret\nAPPFOLIO_BASE_URL=https://example.appfolio.com\n',
+    );
+    const agentDir = join(testDir, 'maintenance-agent-no-appfolio-creds');
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, '.env'), 'BOT_TOKEN=tok\nCHAT_ID=123\n');
+    mockPropertyDirectory([{ PropertyId: 971, MaintenanceLimit: '250.00' }]);
+
+    const id = await createApproval(
+      paths, 'maintenance', 'TestOrg', 'Approve WO#6 -- $150 (100 A Heatherbrook Ct)', 'financial', 'ctx',
+      frameworkRoot, agentDir, 150, 971,
+    );
+
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'resolved', `${id}.json`), 'utf-8'));
+    expect(approval.signoff_required).toBe(false);
+  });
+});
+
 describe('updateApproval (regression guard for activity-channel callback path)', () => {
   it('moves the approval file from pending/ to resolved/ with status+note', async () => {
     // The handleActivityCallback path calls updateApproval with an audit

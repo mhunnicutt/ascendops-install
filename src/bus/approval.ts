@@ -160,6 +160,91 @@ function pingAgentChatId(
     .catch(() => undefined); // Telegram outage must not fail approval creation.
 }
 
+interface AppfolioCredentials {
+  clientId: string;
+  clientSecret: string;
+  baseUrl: string;
+}
+
+/**
+ * Resolve AppFolio REST credentials for the pre-auth-limit lookup below.
+ * Checks process.env first (an agent session that already sourced its own
+ * .env), then the calling agent's own `<agentDir>/.env`, then the org-level
+ * `secrets.env` (shared across every agent in the org). The org-level
+ * fallback is load-bearing: the agent that actually creates these
+ * maintenance-WO approvals does not carry its own AppFolio REST credentials
+ * in its agent .env (only the org secrets.env does), so without this
+ * fallback the lookup would silently never resolve for the one caller this
+ * feature exists for.
+ *
+ * Returns null (never throws) when anything is missing — the lookup is
+ * best-effort and must not block approval creation.
+ */
+function resolveAppfolioCredentials(
+  agentDir: string | undefined,
+  frameworkRoot: string | undefined,
+  org: string | undefined,
+): AppfolioCredentials | null {
+  const sources: Record<string, string>[] = [process.env as Record<string, string>];
+  if (agentDir) {
+    const envPath = join(agentDir, '.env');
+    if (existsSync(envPath)) sources.push(parseEnvFile(envPath));
+  }
+  if (frameworkRoot && org) {
+    const secretsPath = join(frameworkRoot, 'orgs', org, 'secrets.env');
+    if (existsSync(secretsPath)) sources.push(parseEnvFile(secretsPath));
+  }
+
+  let clientId: string | undefined;
+  let clientSecret: string | undefined;
+  let baseUrl: string | undefined;
+  for (const src of sources) {
+    clientId = clientId || src.APPFOLIO_CLIENT_ID;
+    clientSecret = clientSecret || src.APPFOLIO_CLIENT_SECRET;
+    baseUrl = baseUrl || src.APPFOLIO_BASE_URL;
+  }
+
+  if (!clientId || !clientSecret || !baseUrl) return null;
+  return { clientId, clientSecret, baseUrl: baseUrl.replace(/\/$/, '') };
+}
+
+/**
+ * Look up one property's AppFolio MaintenanceLimit (the owner pre-auth
+ * ceiling for repairs that do not require sign-off).
+ *
+ * `/api/v1/reports/property_directory.json` returns EVERY property in one
+ * call (416 rows for this org, no pagination) — see
+ * .claude/skills/appfolio-api/SKILL.md. Fetched fresh per call rather than
+ * cached: approval creation is infrequent enough that one extra ~small
+ * JSON fetch is cheap, and a cache would need invalidation reasoning this
+ * does not need.
+ *
+ * Returns null on ANY failure (network, non-200, property not found,
+ * unparseable value) — callers must treat null as "could not determine"
+ * and fall back to the pre-existing sign-off-required default. Null must
+ * never be read as "no limit", which would let an uncapped cost through.
+ */
+async function getPropertyMaintenanceLimit(
+  propertyId: number,
+  creds: AppfolioCredentials,
+): Promise<number | null> {
+  try {
+    const auth = Buffer.from(`${creds.clientId}:${creds.clientSecret}`).toString('base64');
+    const res = await fetch(`${creds.baseUrl}/api/v1/reports/property_directory.json`, {
+      headers: { Authorization: `Basic ${auth}` },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { results?: Array<Record<string, unknown>> };
+    const row = data.results?.find((r) => r.PropertyId === propertyId);
+    if (!row || typeof row.MaintenanceLimit !== 'string') return null;
+    const limit = parseFloat(row.MaintenanceLimit.replace(/,/g, ''));
+    return Number.isFinite(limit) ? limit : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Create an approval request.
  * Identical to bash create-approval.sh format.
@@ -175,6 +260,18 @@ function pingAgentChatId(
  * fallback chain (explicit arg → CTX_FRAMEWORK_ROOT env → skip). CLI call
  * sites should pass env.frameworkRoot explicitly; daemon-side callers
  * may rely on the env var.
+ *
+ * `cost` + `propertyId` (optional, added 2026-10-19): when BOTH are
+ * provided, this looks up the property's AppFolio MaintenanceLimit and
+ * records `cost`/`property_id`/`maintenance_limit`/`signoff_required` on
+ * the approval (business rule confirmed by Maranda: signoff_required =
+ * cost > property_pre_auth_limit). When `signoff_required` resolves to
+ * false, the approval is written straight to resolved/ as auto-approved —
+ * visible in approval history, but never enters the pending queue or
+ * triggers the Telegram/activity-channel sign-off nudge, since no human
+ * action is needed. ANY failure to resolve the limit (missing creds,
+ * network error, unknown property) falls back to today's behavior
+ * unchanged — full pending approval, sign-off required.
  */
 export async function createApproval(
   paths: BusPaths,
@@ -185,6 +282,8 @@ export async function createApproval(
   context?: string,
   frameworkRoot?: string,
   agentDir?: string,
+  cost?: number,
+  propertyId?: number,
 ): Promise<string> {
   validateApprovalCategory(category);
 
@@ -200,6 +299,27 @@ export async function createApproval(
   const approvalId = `approval_${epoch}_${rand}`;
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 
+  let maintenanceLimit: number | undefined;
+  let signoffRequired: boolean | undefined;
+  if (cost !== undefined && propertyId !== undefined) {
+    const creds = resolveAppfolioCredentials(agentDir, frameworkRoot, org);
+    if (creds) {
+      const limit = await getPropertyMaintenanceLimit(propertyId, creds);
+      if (limit !== null) {
+        maintenanceLimit = limit;
+        signoffRequired = cost > limit;
+      } else {
+        console.warn(
+          `[approval] Could not resolve MaintenanceLimit for property ${propertyId} (${approvalId}) — defaulting to sign-off required.`,
+        );
+      }
+    } else {
+      console.warn(
+        `[approval] No AppFolio credentials available for pre-auth-limit lookup (${approvalId}) — defaulting to sign-off required.`,
+      );
+    }
+  }
+
   const approval: Approval = {
     id: approvalId,
     title,
@@ -212,7 +332,33 @@ export async function createApproval(
     updated_at: now,
     resolved_at: null,
     resolved_by: null,
+    ...(cost !== undefined ? { cost } : {}),
+    ...(propertyId !== undefined ? { property_id: propertyId } : {}),
+    ...(maintenanceLimit !== undefined ? { maintenance_limit: maintenanceLimit } : {}),
+    ...(signoffRequired !== undefined ? { signoff_required: signoffRequired } : {}),
   };
+
+  if (signoffRequired === false) {
+    // At or below the owner pre-auth limit: auto-resolve straight into
+    // resolved/ rather than pending/. Still visible in approval history,
+    // never shows up as a pending sign-off, never triggers the Telegram/
+    // activity-channel nudge (no human action needed).
+    approval.status = 'approved';
+    approval.resolved_at = now;
+    approval.resolved_by = `system:pre-auth-limit ($${cost} <= $${maintenanceLimit})`;
+
+    const resolvedDir = join(paths.approvalDir, 'resolved');
+    ensureDir(resolvedDir);
+    atomicWriteSync(join(resolvedDir, `${approvalId}.json`), JSON.stringify(approval));
+
+    // Notify the requesting agent the same way updateApproval does, so a
+    // caller waiting on the approval-decision inbox message proceeds
+    // immediately instead of waiting on a sign-off that will never come.
+    const msg = `Approval decision: APPROVED\napproval_id: ${approvalId}\ndecision: approved\n Note: within property pre-auth limit ($${cost} <= $${maintenanceLimit}) — no sign-off required.`;
+    sendMessage(paths, 'system', agentName, 'normal', msg);
+
+    return approvalId;
+  }
 
   const pendingDir = join(paths.approvalDir, 'pending');
   ensureDir(pendingDir);

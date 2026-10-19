@@ -138,6 +138,16 @@ export interface Approval {
   updated_at: string;
   resolved_at: string | null;
   resolved_by: string | null;
+  // Pre-auth SLA filter (added 2026-10-19): when a caller provides cost +
+  // property_id, createApproval looks up the property's AppFolio
+  // MaintenanceLimit and records the comparison here. All three are
+  // optional/absent for every approval created before this field existed,
+  // and for any caller that does not pass cost + property_id — additive,
+  // not a breaking schema change. See src/bus/approval.ts.
+  cost?: number;
+  property_id?: number;
+  maintenance_limit?: number;
+  signoff_required?: boolean;
 }
 
 // Agent Config Types (config.json)

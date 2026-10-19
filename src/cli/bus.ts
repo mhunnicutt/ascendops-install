@@ -1919,11 +1919,27 @@ busCommand
   .argument('<title>', 'What you are requesting approval for')
   .argument('<category>', 'Category: external-comms, financial, deployment, data-deletion, other')
   .argument('[context]', 'Additional context')
-  .action(async (title: string, category: string, context?: string) => {
+  .option('--cost <amount>', 'Dollar cost, for the pre-auth-limit filter (requires --property-id)')
+  .option('--property-id <id>', 'AppFolio numeric PropertyId, for the pre-auth-limit filter (requires --cost)')
+  .action(async (title: string, category: string, context: string | undefined, opts: { cost?: string; propertyId?: string }) => {
     const validCategories: ApprovalCategory[] = ['external-comms', 'financial', 'deployment', 'data-deletion', 'other'];
     if (!validCategories.includes(category as ApprovalCategory)) {
       console.error(`Invalid category '${category}'. Must be one of: ${validCategories.join(', ')}`);
       process.exit(1);
+    }
+    let cost: number | undefined;
+    let propertyId: number | undefined;
+    if (opts.cost !== undefined || opts.propertyId !== undefined) {
+      if (opts.cost === undefined || opts.propertyId === undefined) {
+        console.error('--cost and --property-id must be passed together.');
+        process.exit(1);
+      }
+      cost = parseFloat(opts.cost);
+      propertyId = parseInt(opts.propertyId, 10);
+      if (!Number.isFinite(cost) || !Number.isFinite(propertyId)) {
+        console.error('--cost must be a number and --property-id must be an integer.');
+        process.exit(1);
+      }
     }
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
@@ -1933,7 +1949,7 @@ busCommand
     // orgDir resolves to where activity-channel.env actually lives (the
     // framework repo path, NOT the runtime state path — see
     // src/bus/approval.ts:postApprovalToActivityChannel for the history).
-    const id = await createApproval(paths, env.agentName, env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir);
+    const id = await createApproval(paths, env.agentName, env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir, cost, propertyId);
     console.log(id);
   });
 
