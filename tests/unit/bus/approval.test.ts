@@ -436,7 +436,7 @@ describe('createApproval — pre-auth-limit filter (signoff_required)', () => {
 
   it('does nothing (no lookup, no new fields) when cost/propertyId are not passed', async () => {
     global.fetch = vi.fn() as unknown as typeof fetch;
-    const id = await createApproval(paths, 'maintenance', 'TestOrg', 'Approve WO#1 -- $50 (1 Main St)', 'financial', 'ctx', frameworkRoot);
+    const id = await createApproval(paths, 'maintenance', 'TestOrg', 'Approve WO#1 -- $50 [property fixture]', 'financial', 'ctx', frameworkRoot);
 
     expect(global.fetch).not.toHaveBeenCalled();
     const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
@@ -452,7 +452,7 @@ describe('createApproval — pre-auth-limit filter (signoff_required)', () => {
     mockPropertyDirectory([{ PropertyId: 971, MaintenanceLimit: '250.00' }]);
 
     const id = await createApproval(
-      paths, 'maintenance', 'TestOrg', 'Approve WO#1 -- $150 (100 A Heatherbrook Ct)', 'financial', 'ctx',
+      paths, 'maintenance', 'TestOrg', 'Approve WO#1 -- $150 [property 971]', 'financial', 'ctx',
       frameworkRoot, undefined, 150, 971,
     );
 
@@ -478,7 +478,7 @@ describe('createApproval — pre-auth-limit filter (signoff_required)', () => {
     mockPropertyDirectory([{ PropertyId: 971, MaintenanceLimit: '250.00' }]);
 
     const id = await createApproval(
-      paths, 'maintenance', 'TestOrg', 'Approve WO#2 -- $900 (100 A Heatherbrook Ct)', 'financial', 'ctx',
+      paths, 'maintenance', 'TestOrg', 'Approve WO#2 -- $900 [property 971]', 'financial', 'ctx',
       frameworkRoot, undefined, 900, 971,
     );
 
@@ -557,7 +557,7 @@ describe('createApproval — pre-auth-limit filter (signoff_required)', () => {
     mockPropertyDirectory([{ PropertyId: 971, MaintenanceLimit: '250.00' }]);
 
     const id = await createApproval(
-      paths, 'maintenance', 'TestOrg', 'Approve WO#6 -- $150 (100 A Heatherbrook Ct)', 'financial', 'ctx',
+      paths, 'maintenance', 'TestOrg', 'Approve WO#6 -- $150 [property 971]', 'financial', 'ctx',
       frameworkRoot, agentDir, 150, 971,
     );
 
