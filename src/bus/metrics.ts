@@ -497,9 +497,18 @@ export function checkUpstream(
 
   // Count changes
   let commitCount = 0;
+  let commitCountResolved = false;
   try {
     commitCount = parseInt(execSync('git rev-list HEAD..upstream/main --count', { ...execOpts, stdio: 'pipe' }).trim(), 10);
+    commitCountResolved = Number.isFinite(commitCount);
   } catch { /* default 0 */ }
+
+  // A local-only commit makes the SHA values differ without putting this
+  // checkout behind upstream. Only a successfully resolved zero count proves
+  // that there are no upstream commits to report or apply.
+  if (commitCountResolved && commitCount === 0) {
+    return { status: 'up_to_date', message: 'No upstream changes available' };
+  }
 
   let diffStat = '';
   try {

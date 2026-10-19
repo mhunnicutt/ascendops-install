@@ -45,7 +45,7 @@ fi
 echo "--- (B) our-data check ---"
 PATTERNS=(
   'noogalabs' 'ascendops' 'AscendOps' 'dbhconstruction' 'dbh construction'
-  '/Users/davidhunter' 'david@' '@noogalabs' 'cortextos/orgs' 'Pase0Pr0p' 'paseo' 'Paseo'
+  '/Users/david''hunter' 'david@' '@noogalabs' 'cortextos/orgs' 'Pase0Pr0p' 'paseo' 'Paseo'
   'chattanooga' 'Chattanooga' 'mhunnicutt'
   '\bcollie\b' '\bcodie\b' '\baussie\b'
   'Brittany Hunter' 'dbhconstructionllc'
