@@ -17,10 +17,6 @@ import {
   wrapFenceSafe,
   DAEMON_STRUCTURAL_HEADERS,
 } from '../../../src/utils/validate';
-import { readdirSync, readFileSync as readFileSyncNode } from 'node:fs';
-import { join as joinPath } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
 describe('validateInstanceId', () => {
   it('accepts valid instance IDs', () => {
     expect(() => validateInstanceId('default')).not.toThrow();
