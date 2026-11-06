@@ -4,6 +4,7 @@ import { join, extname } from 'path';
 import { readdirSync } from 'fs';
 import { ensureDir } from '../utils/atomic.js';
 import { TelegramAPI } from '../telegram/api.js';
+import { parseDurationMs } from './cron-state.js';
 import type { BusPaths } from '../types/index.js';
 import {
   acquireAutoCommitLease,
@@ -70,6 +71,24 @@ export interface AgentGoalStatus {
 export interface GoalStalenessReport {
   summary: { total: number; stale: number; fresh: number; threshold_days: number };
   agents: AgentGoalStatus[];
+}
+
+export interface ExperimentStalenessStatus {
+  id: string;
+  agent: string;
+  org: string;
+  metric: string;
+  window: string;
+  started_at: string | null;
+  age_days: number;
+  stale: boolean;
+  overdue_days?: number;
+  reason?: string;
+}
+
+export interface ExperimentStalenessReport {
+  summary: { total_running: number; stale: number; fresh: number };
+  experiments: ExperimentStalenessStatus[];
 }
 
 // --- Blocked file patterns ---
@@ -646,6 +665,137 @@ export function checkGoalStaleness(
       threshold_days: thresholdDays,
     },
     agents,
+  };
+}
+
+/**
+ * Find `status: 'running'` experiments (any agent, any org) that have run
+ * past their own declared `window` with no evaluation.
+ *
+ * Root cause this guards against (found 2026-11-06): theta-wave is the only
+ * mechanism that was checking for this, and its cron did not exist for ~90
+ * days. Two experiments (kpi, reni) ran 3-4x past their window with nobody
+ * noticing. This check is independent of any single cron's uptime so it can
+ * also run from a frequent, separately-scheduled job (e.g. the analyst's
+ * heartbeat) rather than depending on theta-wave alone.
+ *
+ * An experiment whose `window` or `started_at`/`created_at` cannot be
+ * parsed is reported as stale (age_days: -1) rather than silently skipped —
+ * an unmeasurable experiment is itself a signal worth surfacing, same as
+ * checkGoalStaleness treating a missing/unparseable GOALS.md as stale.
+ */
+export function checkStaleExperiments(projectRoot: string): ExperimentStalenessReport {
+  const experiments: ExperimentStalenessStatus[] = [];
+  const now = Date.now();
+
+  const orgsDir = join(projectRoot, 'orgs');
+  if (!existsSync(orgsDir)) {
+    return { summary: { total_running: 0, stale: 0, fresh: 0 }, experiments: [] };
+  }
+
+  let orgNames: string[];
+  try {
+    orgNames = readdirSync(orgsDir).filter(name => {
+      try {
+        return statSync(join(orgsDir, name)).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    orgNames = [];
+  }
+
+  for (const orgName of orgNames) {
+    const agentsDir = join(orgsDir, orgName, 'agents');
+    if (!existsSync(agentsDir)) continue;
+
+    let agentNames: string[];
+    try {
+      agentNames = readdirSync(agentsDir).filter(name => {
+        if (!/^[a-z0-9_-]+$/.test(name)) return false;
+        try {
+          return statSync(join(agentsDir, name)).isDirectory();
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      continue;
+    }
+
+    for (const agentName of agentNames) {
+      const historyDir = join(agentsDir, agentName, 'experiments', 'history');
+      if (!existsSync(historyDir)) continue;
+
+      let files: string[];
+      try {
+        files = readdirSync(historyDir).filter(f => f.endsWith('.json'));
+      } catch {
+        continue;
+      }
+
+      for (const file of files) {
+        let exp: { id: string; metric: string; status: string; window: string; started_at: string | null; created_at: string };
+        try {
+          exp = JSON.parse(readFileSync(join(historyDir, file), 'utf-8').trim());
+        } catch {
+          continue;
+        }
+
+        if (exp.status !== 'running') continue;
+
+        const startedAt = exp.started_at || exp.created_at;
+        const startedMs = startedAt ? new Date(startedAt).getTime() : NaN;
+
+        if (!startedAt || isNaN(startedMs)) {
+          experiments.push({
+            id: exp.id, agent: agentName, org: orgName, metric: exp.metric,
+            window: exp.window, started_at: exp.started_at,
+            age_days: -1, stale: true,
+            reason: 'no parseable started_at/created_at timestamp',
+          });
+          continue;
+        }
+
+        const ageDays = Math.floor((now - startedMs) / 86400000);
+        const windowMs = parseDurationMs(exp.window);
+
+        if (isNaN(windowMs)) {
+          experiments.push({
+            id: exp.id, agent: agentName, org: orgName, metric: exp.metric,
+            window: exp.window, started_at: exp.started_at,
+            age_days: ageDays, stale: true,
+            reason: `could not parse window '${exp.window}'`,
+          });
+          continue;
+        }
+
+        const elapsedMs = now - startedMs;
+        const isStale = elapsedMs > windowMs;
+
+        experiments.push({
+          id: exp.id, agent: agentName, org: orgName, metric: exp.metric,
+          window: exp.window, started_at: exp.started_at,
+          age_days: ageDays, stale: isStale,
+          ...(isStale ? { overdue_days: Math.floor((elapsedMs - windowMs) / 86400000) } : {}),
+          reason: isStale
+            ? `running ${ageDays}d, window was ${exp.window}`
+            : undefined,
+        });
+      }
+    }
+  }
+
+  const staleCount = experiments.filter(e => e.stale).length;
+
+  return {
+    summary: {
+      total_running: experiments.length,
+      stale: staleCount,
+      fresh: experiments.length - staleCount,
+    },
+    experiments,
   };
 }
 

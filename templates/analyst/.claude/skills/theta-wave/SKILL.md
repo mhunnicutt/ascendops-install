@@ -48,6 +48,8 @@ If you have an active theta wave experiment:
 - Log via evaluate-experiment.sh
 
 ### Phase 4: Evaluate Agent Research Cycles
+Start with `cortextos bus check-stale-experiments` -- a fleet-wide, cron-independent check for any `running` experiment that has gone past its own declared window with no evaluation. This exists specifically so a lapsed theta-wave cron (as happened 2026-11-06, ~90 days with no theta-wave cron at all, leaving two experiments running 3-4x past their windows) cannot hide an overdue experiment indefinitely -- it also runs every heartbeat, independent of this weekly cycle. Any experiment it flags gets evaluated or given a hard deadline THIS cycle, not carried forward again.
+
 For each agent with active experiments:
 - Review their latest results (gather-context.sh output)
 - Calculate keep rate and improvement trajectory

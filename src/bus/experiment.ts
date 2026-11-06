@@ -33,6 +33,7 @@ export interface ExperimentCreateOptions {
   window?: string;
   measurement?: string;
   approval_required?: boolean;
+  baseline?: number;
 }
 
 export interface ExperimentEvaluateOptions {
@@ -147,6 +148,15 @@ function saveConfig(agentDir: string, config: ExperimentConfig): void {
  * fallback, repeat experiments on that metric stop losing the measurement
  * description because the agent forgot to pass --measurement.
  * Explicit options always win over the cycle so ad-hoc overrides still work.
+ *
+ * `baseline` sets the real pre-treatment value to compare against at
+ * evaluation time (BUG-029: previously always hardcoded to 0 regardless of
+ * the hypothesis, so evaluate-experiment's keep/discard auto-decision was
+ * comparing the measured value against 0 instead of the actual baseline —
+ * silently producing a wrong decision on any experiment with a nonzero
+ * baseline unless hand-corrected in the JSON file afterward). Omitting it
+ * preserves the old default of 0, so existing qualitative-score workflows
+ * that pass a placeholder measured value are unaffected.
  */
 export function createExperiment(
   agentDir: string,
@@ -171,7 +181,7 @@ export function createExperiment(
     window: options?.window ?? cycleDefaults.window ?? '24h',
     measurement: options?.measurement ?? cycleDefaults.measurement ?? '',
     status: 'proposed',
-    baseline_value: 0,
+    baseline_value: options?.baseline ?? 0,
     result_value: null,
     decision: null,
     learning: '',

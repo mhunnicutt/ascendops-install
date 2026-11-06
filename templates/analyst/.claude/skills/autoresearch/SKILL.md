@@ -55,8 +55,9 @@ Based on accumulated learnings:
 
 ### Step 4: Create Experiment
 ```bash
-cortextos bus create-experiment "<metric_name>" "<your hypothesis>" --surface <path> --direction <higher|lower> --window <duration>
+cortextos bus create-experiment "<metric_name>" "<your hypothesis>" --surface <path> --direction <higher|lower> --window <duration> --baseline <real_pretreatment_value>
 ```
+**Always pass `--baseline` when you have a real pre-treatment number** (even an approximate one). Omitting it defaults to 0 (BUG-029) -- `evaluate-experiment`'s automatic keep/discard decision compares your measured value against whatever baseline_value is stored, so a genuine win on a metric with a nonzero baseline (e.g. 6.17d vs a real 9.45d baseline) will silently auto-discard unless the real baseline was set at creation.
 If `approval_required` is true in `experiments/config.json`, you must manually create an approval before proceeding:
 ```bash
 APPR_ID=$(cortextos bus create-approval "Run experiment: <hypothesis>" experiments "Cycle: <cycle_name>, Metric: <metric_name>, Surface: <surface>")
