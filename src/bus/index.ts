@@ -12,10 +12,13 @@ export {
   selfRestart,
   autoCommit,
   checkGoalStaleness,
+  checkStaleExperiments,
   postActivity,
   type AutoCommitReport,
   type AgentGoalStatus,
   type GoalStalenessReport,
+  type ExperimentStalenessStatus,
+  type ExperimentStalenessReport,
 } from './system.js';
 export {
   createExperiment,

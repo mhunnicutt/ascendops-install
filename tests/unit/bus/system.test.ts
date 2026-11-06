@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
-import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../../../src/bus/system';
+import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, checkStaleExperiments, postActivity } from '../../../src/bus/system';
 import { acquireAutoCommitLease, getAutoCommitLeaseStatus } from '../../../src/bus/auto-commit-lease';
 import type { BusPaths } from '../../../src/types';
 
@@ -478,6 +478,103 @@ describe('Bus System', () => {
 
       const report = checkGoalStaleness(testDir);
       expect(report.summary.total).toBe(2);
+    });
+  });
+
+  describe('checkStaleExperiments', () => {
+    function writeExperiment(
+      testDirArg: string,
+      org: string,
+      agent: string,
+      exp: Record<string, unknown>,
+    ) {
+      const historyDir = join(testDirArg, 'orgs', org, 'agents', agent, 'experiments', 'history');
+      mkdirSync(historyDir, { recursive: true });
+      writeFileSync(join(historyDir, `${exp.id}.json`), JSON.stringify(exp));
+    }
+
+    it('flags a running experiment past its window', () => {
+      const startedAt = new Date(Date.now() - 30 * 86400 * 1000).toISOString(); // 30 days ago
+      writeExperiment(testDir, 'myorg', 'kpi', {
+        id: 'exp_1', agent: 'kpi', metric: 'same_day_reply_rate', status: 'running',
+        window: '21d', started_at: startedAt, created_at: startedAt,
+      });
+
+      const report = checkStaleExperiments(testDir);
+      expect(report.summary.total_running).toBe(1);
+      expect(report.summary.stale).toBe(1);
+      expect(report.experiments[0].id).toBe('exp_1');
+      expect(report.experiments[0].agent).toBe('kpi');
+      expect(report.experiments[0].org).toBe('myorg');
+      expect(report.experiments[0].stale).toBe(true);
+      expect(report.experiments[0].overdue_days).toBeGreaterThanOrEqual(8);
+    });
+
+    it('does not flag a running experiment still inside its window', () => {
+      const startedAt = new Date(Date.now() - 2 * 86400 * 1000).toISOString(); // 2 days ago
+      writeExperiment(testDir, 'myorg', 'reni', {
+        id: 'exp_2', agent: 'reni', metric: 'days_in_reviewing_stage', status: 'running',
+        window: '30d', started_at: startedAt, created_at: startedAt,
+      });
+
+      const report = checkStaleExperiments(testDir);
+      expect(report.summary.stale).toBe(0);
+      expect(report.summary.fresh).toBe(1);
+      expect(report.experiments[0].stale).toBe(false);
+      expect(report.experiments[0].overdue_days).toBeUndefined();
+    });
+
+    it('ignores non-running experiments', () => {
+      writeExperiment(testDir, 'myorg', 'anna', {
+        id: 'exp_3', agent: 'anna', metric: 'system_effectiveness', status: 'completed',
+        window: '24h', started_at: new Date(Date.now() - 365 * 86400 * 1000).toISOString(),
+      });
+
+      const report = checkStaleExperiments(testDir);
+      expect(report.summary.total_running).toBe(0);
+      expect(report.experiments).toEqual([]);
+    });
+
+    it('flags (rather than skips) an unparseable window as stale', () => {
+      writeExperiment(testDir, 'myorg', 'kpi', {
+        id: 'exp_4', agent: 'kpi', metric: 'x', status: 'running',
+        window: '168h-but-malformed', started_at: new Date().toISOString(),
+      });
+
+      const report = checkStaleExperiments(testDir);
+      expect(report.experiments[0].stale).toBe(true);
+      expect(report.experiments[0].reason).toContain('could not parse window');
+    });
+
+    it('flags (rather than skips) a missing started_at/created_at as stale', () => {
+      writeExperiment(testDir, 'myorg', 'kpi', {
+        id: 'exp_5', agent: 'kpi', metric: 'x', status: 'running',
+        window: '24h', started_at: null, created_at: null,
+      });
+
+      const report = checkStaleExperiments(testDir);
+      expect(report.experiments[0].stale).toBe(true);
+      expect(report.experiments[0].age_days).toBe(-1);
+    });
+
+    it('scans multiple agents across multiple orgs', () => {
+      const oldDate = new Date(Date.now() - 90 * 86400 * 1000).toISOString();
+      writeExperiment(testDir, 'org1', 'kpi', {
+        id: 'exp_6', agent: 'kpi', metric: 'x', status: 'running', window: '21d', started_at: oldDate,
+      });
+      writeExperiment(testDir, 'org2', 'reni', {
+        id: 'exp_7', agent: 'reni', metric: 'y', status: 'running', window: '21d', started_at: oldDate,
+      });
+
+      const report = checkStaleExperiments(testDir);
+      expect(report.summary.total_running).toBe(2);
+      expect(report.summary.stale).toBe(2);
+    });
+
+    it('returns empty report when no orgs directory exists', () => {
+      const report = checkStaleExperiments(testDir);
+      expect(report.summary.total_running).toBe(0);
+      expect(report.experiments).toEqual([]);
     });
   });
 

@@ -68,6 +68,16 @@ cortextos bus list-tasks --agent $CTX_AGENT_NAME --status in_progress
 
 Stale tasks are visible on the dashboard. They make you look broken.
 
+## Step 3c: Check for stale experiments (fleet-wide, any agent)
+
+```bash
+cortextos bus check-stale-experiments
+```
+
+This flags any `running` experiment (yours or any other agent's) that has gone past its own declared measurement window with no evaluation. It is independent of theta-wave's weekly cron by design — run it every heartbeat so a lapsed theta-wave cron can never again let an experiment sit unevaluated for weeks (found 2026-11-06: two experiments ran 90 days past a 21-30 day window because the only thing checking for this, theta-wave itself, had no cron scheduled).
+
+For each stale experiment reported: message the owning agent directly with the experiment ID and ask them to evaluate it (pull real data if needed) or explain why it can't be closed yet. Don't try to evaluate another agent's experiment yourself — `evaluate-experiment` is scoped to the caller's own agent directory.
+
 ## Step 4: Log heartbeat event
 
 ```bash

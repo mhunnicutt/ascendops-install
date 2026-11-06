@@ -137,6 +137,38 @@ describe('Sprint 3: Experiment Framework', () => {
       expect(exp.surface).toBe('default-surface.md'); // inherited from cycle
     });
 
+    it('accepts an explicit baseline (BUG-029 fix) instead of hardcoding 0', () => {
+      const id = createExperiment(testDir, 'testbot', 'days_to_lv_resolution', 'Bundled LV packet delivery', {
+        direction: 'lower',
+        baseline: 9.45,
+      });
+      const exp = JSON.parse(
+        readFileSync(join(testDir, 'experiments', 'history', `${id}.json`), 'utf-8').trim(),
+      );
+      expect(exp.baseline_value).toBe(9.45);
+    });
+
+    it('defaults baseline to 0 when --baseline is omitted (back-compat)', () => {
+      const id = createExperiment(testDir, 'testbot', 'ctr', 'test');
+      const exp = JSON.parse(
+        readFileSync(join(testDir, 'experiments', 'history', `${id}.json`), 'utf-8').trim(),
+      );
+      expect(exp.baseline_value).toBe(0);
+    });
+
+    it('a real baseline makes evaluate-experiment compute the correct decision (BUG-029 regression)', () => {
+      // Without a real baseline, a genuine win (6.17 vs true baseline 9.45,
+      // direction=lower) would auto-discard because 6.17 is compared against
+      // the hardcoded 0 instead of 9.45.
+      const id = createExperiment(testDir, 'reni', 'days_to_lv_resolution', 'Bundled LV packet delivery', {
+        direction: 'lower',
+        baseline: 9.45,
+      });
+      runExperiment(testDir, id);
+      const result = evaluateExperiment(testDir, id, 6.17);
+      expect(result.decision).toBe('keep');
+    });
+
     it('falls through to static defaults when no matching cycle exists', () => {
       mkdirSync(join(testDir, 'experiments'), { recursive: true });
       writeFileSync(

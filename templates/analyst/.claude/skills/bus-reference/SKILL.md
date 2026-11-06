@@ -290,6 +290,13 @@ Check each agent's GOALS.md Updated timestamp. Flags goals older than threshold.
 cortextos bus check-goal-staleness [--threshold DAYS] [--json]
 ```
 
+### check-stale-experiments
+Find `running` experiments (any agent, any org) that have gone past their own declared window with no evaluation. Cron-independent by design -- run it every heartbeat, not just from theta-wave.
+
+```bash
+cortextos bus check-stale-experiments
+```
+
 ### check-human-tasks
 Check for stale human-assigned tasks and send reminders.
 
@@ -326,8 +333,9 @@ cortextos bus post-activity "<message>"
 Create a new experiment proposal. For system-scope, auto-creates an approval.
 
 ```bash
-cortextos bus create-experiment <metric_name> "<hypothesis>" [--surface <path>] [--direction higher|lower] [--window <duration>] [--measurement <cmd>]
+cortextos bus create-experiment <metric_name> "<hypothesis>" [--surface <path>] [--direction higher|lower] [--window <duration>] [--measurement <cmd>] [--baseline <real_pretreatment_value>]
 ```
+Always pass `--baseline` when a real pre-treatment number exists -- omitting it defaults to 0 (BUG-029), which can make `evaluate-experiment` auto-compute the wrong keep/discard decision.
 
 ### run-experiment
 Start running a proposed experiment.
@@ -449,6 +457,7 @@ cortextos bus submit-community-item <item-name> <item-type> "<description>" [--d
 | Check fleet heartbeats            | `read-all-heartbeats`     |
 | Find stale tasks                  | `check-stale-tasks`       |
 | Find stale goals                  | `check-goal-staleness`    |
+| Find stale/overdue experiments    | `check-stale-experiments` |
 | Archive old tasks                 | `archive-tasks`           |
 | Run an experiment                 | `create-experiment`       |
 | Restart (keep history)            | `self-restart`            |

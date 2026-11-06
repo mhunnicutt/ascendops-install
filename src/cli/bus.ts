@@ -11,7 +11,7 @@ import { logEvent } from '../bus/event.js';
 import { redactSSN } from '../utils/ssn-redaction.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
 import { queryCap } from '../bus/query-cap.js';
-import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../bus/system.js';
+import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, checkStaleExperiments, postActivity } from '../bus/system.js';
 import {
   assertAutoCommitLeaseHeld,
   getAutoCommitLeaseStatus,
@@ -1326,6 +1326,16 @@ busCommand
   });
 
 busCommand
+  .command('check-stale-experiments')
+  .description('Find running experiments (any agent, any org) that have run past their own declared window with no evaluation')
+  .action(() => {
+    const env = resolveEnv();
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const report = checkStaleExperiments(projectRoot);
+    console.log(JSON.stringify(report, null, 2));
+  });
+
+busCommand
   .command('post-activity')
   .description('Post a message to the org Telegram activity channel')
   .argument('<message>', 'Message to post')
@@ -1352,13 +1362,15 @@ busCommand
   .option('--surface <path>', 'Surface file path')
   .option('--direction <dir>', 'Direction: higher or lower', 'higher')
   .option('--window <dur>', 'Measurement window', '24h')
-  .action(async (metric: string, hypothesis: string, opts: { surface?: string; direction?: string; window?: string }) => {
+  .option('--baseline <value>', 'Real pre-treatment baseline to evaluate against (BUG-029: omitting this defaults to 0, which can produce a wrong keep/discard decision at evaluation time)')
+  .action(async (metric: string, hypothesis: string, opts: { surface?: string; direction?: string; window?: string; baseline?: string }) => {
     const env = resolveEnv();
     const agentDir = env.agentDir || process.cwd();
     const id = createExperiment(agentDir, env.agentName, metric, hypothesis, {
       surface: opts.surface,
       direction: opts.direction as 'higher' | 'lower',
       window: opts.window,
+      baseline: opts.baseline !== undefined ? parseFloat(opts.baseline) : undefined,
     });
     console.log(id);
 
