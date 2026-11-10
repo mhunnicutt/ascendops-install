@@ -4,12 +4,17 @@ import { useState, useTransition } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
-import type { Turn, TurnInspectionItem, TurnAuditEntry, TurnStatus, TurnType, ItemClassification, ItemStatus } from '@/lib/data/turns';
+import type { Turn, TurnInspectionItem, TurnAuditEntry, TurnStatus, TurnType, ClosePath, ItemClassification, ItemStatus } from '@/lib/data/turns';
 
-const STATUSES: TurnStatus[] = ['INSPECTION_PULLED', 'REVIEW_IN_PROGRESS', 'REVIEW_COMPLETE', 'WOS_ACTIVE', 'CLOSED'];
+// CLOSED is reached only via the dedicated Close action below (which also
+// requires a close_path) or by the AppFolio sync -- never offered in this
+// dropdown, so a turn can't land in Closed without a path recorded or an
+// AppFolio TurnEndDate behind it.
+const STATUSES: TurnStatus[] = ['INSPECTION_PULLED', 'REVIEW_IN_PROGRESS', 'REVIEW_COMPLETE', 'WOS_ACTIVE'];
 const TURN_TYPES: TurnType[] = ['FPM', 'OWNER', 'HYBRID'];
 const CLASSIFICATIONS: ItemClassification[] = ['TCB', 'NORMAL_WEAR', 'NOT_NEEDED'];
 const ITEM_STATUSES: ItemStatus[] = ['NEEDED', 'ASSIGNED', 'COMPLETED'];
+const CLOSE_PATH_LABEL: Record<ClosePath, string> = { to_marketing: 'To Marketing', no_longer_managing: 'No Longer Managing' };
 
 function centsToDollars(cents: number | null): string {
   if (cents === null) return '—';
@@ -64,6 +69,23 @@ export function TurnDetail({
     });
   }
 
+  function onClose(closePath: ClosePath) {
+    setError(null);
+    startTransition(async () => {
+      const resp = await fetch(`/api/turns/${turn.id}/close`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ close_path: closePath }),
+      });
+      if (!resp.ok) {
+        setError('Failed to close turn.');
+        return;
+      }
+      const { turn: updated } = await resp.json();
+      setTurn(updated);
+    });
+  }
+
   function onItemChange(itemId: string, patch: Partial<Pick<TurnInspectionItem, 'classification' | 'item_status' | 'wo_vendor'>>) {
     setError(null);
     startTransition(async () => {
@@ -101,18 +123,24 @@ export function TurnDetail({
           <CardTitle>Status</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-wrap items-center gap-4">
-          <select
-            className="rounded-md border border-border bg-background px-3 py-1.5 text-sm"
-            value={turn.status}
-            disabled={isPending}
-            onChange={(e) => onStatusChange(e.target.value as TurnStatus)}
-          >
-            {STATUSES.map((s) => (
-              <option key={s} value={s}>
-                {s.replaceAll('_', ' ')}
-              </option>
-            ))}
-          </select>
+          {turn.status === 'CLOSED' ? (
+            <Badge variant="outline">
+              Closed{turn.close_path ? ` — ${CLOSE_PATH_LABEL[turn.close_path]}` : ' — closed in AppFolio'}
+            </Badge>
+          ) : (
+            <select
+              className="rounded-md border border-border bg-background px-3 py-1.5 text-sm"
+              value={turn.status}
+              disabled={isPending}
+              onChange={(e) => onStatusChange(e.target.value as TurnStatus)}
+            >
+              {STATUSES.map((s) => (
+                <option key={s} value={s}>
+                  {s.replaceAll('_', ' ')}
+                </option>
+              ))}
+            </select>
+          )}
           <select
             className="rounded-md border border-border bg-background px-3 py-1.5 text-sm"
             value={turn.turn_type ?? ''}
@@ -134,6 +162,27 @@ export function TurnDetail({
             <Badge variant="outline" title="Owner has a standing rekey policy -- confirm before dispatching a rekey vendor">
               Owner exception
             </Badge>
+          )}
+          {turn.status !== 'CLOSED' && (
+            <div className="ml-auto flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">Close turn:</span>
+              <button
+                type="button"
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+                disabled={isPending}
+                onClick={() => onClose('to_marketing')}
+              >
+                To Marketing
+              </button>
+              <button
+                type="button"
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+                disabled={isPending}
+                onClick={() => onClose('no_longer_managing')}
+              >
+                No Longer Managing
+              </button>
+            </div>
           )}
         </CardContent>
       </Card>
