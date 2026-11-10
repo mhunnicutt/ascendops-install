@@ -74,6 +74,7 @@ const navItems: NavItem[] = [
   // Operations
   { label: 'Comms', href: '/comms', icon: IconMessages, section: 'ops' },
   { label: 'Approvals', href: '/approvals', icon: IconShieldCheck, section: 'ops' },
+  { label: 'Turns', href: '/turns', icon: IconTool, section: 'ops' },
   { label: 'SOP Library', href: '/sops', icon: IconChecklist, section: 'ops' },
   { label: 'Scheduled Jobs', href: '/workflows', icon: IconClock, section: 'ops' },
   { label: 'Strategy', href: '/strategy', icon: IconTarget, section: 'ops' },
