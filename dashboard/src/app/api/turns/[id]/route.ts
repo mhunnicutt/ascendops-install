@@ -12,12 +12,14 @@ import {
 
 export const dynamic = 'force-dynamic';
 
+// CLOSED is deliberately not settable here -- it requires a close_path
+// (Maranda, 2026-11-10), so it only happens via POST /api/turns/[id]/close
+// or the AppFolio sync picking up a TurnEndDate on an already-tracked turn.
 const VALID_STATUSES: TurnStatus[] = [
   'INSPECTION_PULLED',
   'REVIEW_IN_PROGRESS',
   'REVIEW_COMPLETE',
   'WOS_ACTIVE',
-  'CLOSED',
 ];
 
 const VALID_TURN_TYPES: TurnType[] = ['FPM', 'OWNER', 'HYBRID'];

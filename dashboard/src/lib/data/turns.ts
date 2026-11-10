@@ -17,6 +17,7 @@ export type TurnType = 'FPM' | 'OWNER' | 'HYBRID';
 export type TurnStatus = 'INSPECTION_PULLED' | 'REVIEW_IN_PROGRESS' | 'REVIEW_COMPLETE' | 'WOS_ACTIVE' | 'CLOSED';
 export type ItemClassification = 'TCB' | 'NORMAL_WEAR' | 'NOT_NEEDED';
 export type ItemStatus = 'NEEDED' | 'ASSIGNED' | 'COMPLETED';
+export type ClosePath = 'to_marketing' | 'no_longer_managing';
 
 export interface Turn {
   id: string;
@@ -35,6 +36,7 @@ export interface Turn {
   rekey_flag: boolean;
   owner_exception_flag: boolean;
   leadsimple_process_id: string | null;
+  close_path: ClosePath | null; // set by Lorrie when she closes a turn (003_turns_close_path.sql); null if AppFolio closed it first
   revision: number;
   created_at: string;
   updated_at: string;
@@ -109,6 +111,12 @@ export async function updateTurnStatus(id: string, status: TurnStatus, byPerson:
 export async function updateTurnType(id: string, turnType: TurnType, byPerson: string): Promise<Turn> {
   const [updated] = await supabaseUpdate<Turn>('turns', { id: `eq.${id}` }, { turn_type: turnType });
   await logTurnAudit({ turn_id: id, action: 'TURN_TYPE_CHANGE', by_person: byPerson, details: { turn_type: turnType } });
+  return updated;
+}
+
+export async function closeTurn(id: string, closePath: ClosePath, byPerson: string): Promise<Turn> {
+  const [updated] = await supabaseUpdate<Turn>('turns', { id: `eq.${id}` }, { status: 'CLOSED', close_path: closePath });
+  await logTurnAudit({ turn_id: id, action: 'TURN_CLOSED', by_person: byPerson, details: { close_path: closePath } });
   return updated;
 }
 
