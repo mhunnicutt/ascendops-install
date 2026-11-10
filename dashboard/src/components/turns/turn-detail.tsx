@@ -4,9 +4,10 @@ import { useState, useTransition } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
-import type { Turn, TurnInspectionItem, TurnAuditEntry, TurnStatus, ItemClassification, ItemStatus } from '@/lib/data/turns';
+import type { Turn, TurnInspectionItem, TurnAuditEntry, TurnStatus, TurnType, ItemClassification, ItemStatus } from '@/lib/data/turns';
 
 const STATUSES: TurnStatus[] = ['INSPECTION_PULLED', 'REVIEW_IN_PROGRESS', 'REVIEW_COMPLETE', 'WOS_ACTIVE', 'CLOSED'];
+const TURN_TYPES: TurnType[] = ['FPM', 'OWNER', 'HYBRID'];
 const CLASSIFICATIONS: ItemClassification[] = ['TCB', 'NORMAL_WEAR', 'NOT_NEEDED'];
 const ITEM_STATUSES: ItemStatus[] = ['NEEDED', 'ASSIGNED', 'COMPLETED'];
 
@@ -39,6 +40,23 @@ export function TurnDetail({
       });
       if (!resp.ok) {
         setError('Failed to update status.');
+        return;
+      }
+      const { turn: updated } = await resp.json();
+      setTurn(updated);
+    });
+  }
+
+  function onTurnTypeChange(turn_type: TurnType) {
+    setError(null);
+    startTransition(async () => {
+      const resp = await fetch(`/api/turns/${turn.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ turn_type }),
+      });
+      if (!resp.ok) {
+        setError('Failed to update turn type.');
         return;
       }
       const { turn: updated } = await resp.json();
@@ -95,7 +113,21 @@ export function TurnDetail({
               </option>
             ))}
           </select>
-          <span className="text-sm text-muted-foreground">Type: {turn.turn_type ?? 'Not yet determined'}</span>
+          <select
+            className="rounded-md border border-border bg-background px-3 py-1.5 text-sm"
+            value={turn.turn_type ?? ''}
+            disabled={isPending}
+            onChange={(e) => onTurnTypeChange(e.target.value as TurnType)}
+          >
+            <option value="" disabled>
+              Set type…
+            </option>
+            {TURN_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
           <span className="text-sm text-muted-foreground">SD available: {centsToDollars(turn.sd_available_cents)}</span>
           {turn.rekey_flag && <Badge variant="outline">Rekey</Badge>}
           {turn.owner_exception_flag && (

@@ -106,6 +106,12 @@ export async function updateTurnStatus(id: string, status: TurnStatus, byPerson:
   return updated;
 }
 
+export async function updateTurnType(id: string, turnType: TurnType, byPerson: string): Promise<Turn> {
+  const [updated] = await supabaseUpdate<Turn>('turns', { id: `eq.${id}` }, { turn_type: turnType });
+  await logTurnAudit({ turn_id: id, action: 'TURN_TYPE_CHANGE', by_person: byPerson, details: { turn_type: turnType } });
+  return updated;
+}
+
 export async function updateInspectionItem(
   turnId: string,
   itemId: string,
