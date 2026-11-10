@@ -29,7 +29,7 @@ export interface Turn {
   move_in_date: string | null;
   move_in_date_ambiguous: boolean;
   tenancy_length_days: number | null;
-  turn_type: TurnType;
+  turn_type: TurnType | null; // null until the LeadSimple "09 Unit Turn" lookup is built (002_turns_turn_type_nullable.sql)
   status: TurnStatus;
   sd_available_cents: number | null;
   rekey_flag: boolean;

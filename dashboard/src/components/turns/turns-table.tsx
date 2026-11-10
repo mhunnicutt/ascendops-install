@@ -42,7 +42,7 @@ export function TurnsTable({ turns }: { turns: Turn[] }) {
             </TableCell>
             <TableCell>{turn.move_out_date}</TableCell>
             <TableCell>{daysSince(turn.move_out_date)}d</TableCell>
-            <TableCell>{turn.turn_type}</TableCell>
+            <TableCell>{turn.turn_type ?? '—'}</TableCell>
             <TableCell>
               <Badge variant={STATUS_VARIANT[turn.status]}>{turn.status.replaceAll('_', ' ')}</Badge>
             </TableCell>

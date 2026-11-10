@@ -95,7 +95,7 @@ export function TurnDetail({
               </option>
             ))}
           </select>
-          <span className="text-sm text-muted-foreground">Type: {turn.turn_type}</span>
+          <span className="text-sm text-muted-foreground">Type: {turn.turn_type ?? 'Not yet determined'}</span>
           <span className="text-sm text-muted-foreground">SD available: {centsToDollars(turn.sd_available_cents)}</span>
           {turn.rekey_flag && <Badge variant="outline">Rekey</Badge>}
           {turn.owner_exception_flag && (
